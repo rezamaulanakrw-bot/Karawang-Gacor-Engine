@@ -1,0 +1,808 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Buat struktur proyek
+        run: |
+          mkdir -p gacor_build && cd gacor_build
+          mkdir -p "app"
+          cat > "app/build.gradle" <<'GACOR_EOF'
+          plugins {
+              id 'com.android.application'
+              id 'org.jetbrains.kotlin.android'
+          }
+
+          android {
+              namespace 'id.karawang.gacorengine'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "id.karawang.gacorengine"
+                  minSdk 26
+                  targetSdk 34
+                  versionCode 3
+                  versionName "2.1"
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                      proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = '17' }
+          }
+
+          dependencies {
+              implementation 'androidx.core:core-ktx:1.12.0'
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+              implementation 'com.google.android.material:material:1.11.0'
+          }
+          GACOR_EOF
+          mkdir -p "app"
+          cat > "app/proguard-rules.pro" <<'GACOR_EOF'
+          # no special rules
+          GACOR_EOF
+          mkdir -p "app/src/main"
+          cat > "app/src/main/AndroidManifest.xml" <<'GACOR_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+              <application
+                  android:allowBackup="false"
+                  android:icon="@drawable/ic_launcher"
+                  android:roundIcon="@drawable/ic_launcher"
+                  android:label="@string/app_name"
+                  android:supportsRtl="true"
+                  android:theme="@style/Theme.Gacor">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+
+                  <service
+                      android:name=".GacorService"
+                      android:exported="true"
+                      android:label="@string/app_name"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data
+                          android:name="android.accessibilityservice"
+                          android:resource="@xml/accessibility_service_config" />
+                  </service>
+
+                  <service
+                      android:name=".FloatingWidgetService"
+                      android:exported="false" />
+              </application>
+          </manifest>
+          GACOR_EOF
+          mkdir -p "app/src/main/java/id/karawang/gacorengine"
+          cat > "app/src/main/java/id/karawang/gacorengine/FloatingWidgetService.kt" <<'GACOR_EOF'
+          package id.karawang.gacorengine
+
+          import android.annotation.SuppressLint
+          import android.app.Service
+          import android.content.Intent
+          import android.content.res.ColorStateList
+          import android.graphics.Color
+          import android.graphics.PixelFormat
+          import android.os.IBinder
+          import android.view.Gravity
+          import android.view.LayoutInflater
+          import android.view.MotionEvent
+          import android.view.View
+          import android.view.WindowManager
+          import android.widget.Button
+
+          class FloatingWidgetService : Service() {
+
+              private var wm: WindowManager? = null
+              private var view: View? = null
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              @SuppressLint("ClickableViewAccessibility")
+              override fun onCreate() {
+                  super.onCreate()
+                  val v = LayoutInflater.from(this).inflate(R.layout.widget_floating, null)
+                  view = v
+
+                  val params = WindowManager.LayoutParams(
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.WRAP_CONTENT,
+                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                      PixelFormat.TRANSLUCENT
+                  ).apply {
+                      gravity = Gravity.TOP or Gravity.START
+                      x = 100
+                      y = 300
+                  }
+
+                  wm = getSystemService(WINDOW_SERVICE) as WindowManager
+                  wm?.addView(v, params)
+
+                  val btn = v.findViewById<Button>(R.id.btnWidgetToggle)
+                  fun refresh() {
+                      if (Prefs.isActive(this)) {
+                          btn.text = "SIKAT: ON"
+                          btn.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#10B981"))
+                      } else {
+                          btn.text = "SIKAT: OFF"
+                          btn.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#EF4444"))
+                      }
+                  }
+                  refresh()
+
+                  var startX = 0; var startY = 0
+                  var touchX = 0f; var touchY = 0f
+                  var moved = false
+                  btn.setOnTouchListener { _, e ->
+                      when (e.action) {
+                          MotionEvent.ACTION_DOWN -> {
+                              startX = params.x; startY = params.y
+                              touchX = e.rawX; touchY = e.rawY
+                              moved = false
+                              true
+                          }
+                          MotionEvent.ACTION_MOVE -> {
+                              val dx = (e.rawX - touchX).toInt()
+                              val dy = (e.rawY - touchY).toInt()
+                              if (Math.abs(dx) > 10 || Math.abs(dy) > 10) moved = true
+                              params.x = startX + dx
+                              params.y = startY + dy
+                              wm?.updateViewLayout(v, params)
+                              true
+                          }
+                          MotionEvent.ACTION_UP -> {
+                              if (!moved) {
+                                  Prefs.setActive(this, !Prefs.isActive(this))
+                                  refresh()
+                              }
+                              true
+                          }
+                          else -> false
+                      }
+                  }
+              }
+
+              override fun onDestroy() {
+                  super.onDestroy()
+                  view?.let { try { wm?.removeView(it) } catch (_: Exception) {} }
+                  view = null
+              }
+          }
+          GACOR_EOF
+          mkdir -p "app/src/main/java/id/karawang/gacorengine"
+          cat > "app/src/main/java/id/karawang/gacorengine/GacorService.kt" <<'GACOR_EOF'
+          package id.karawang.gacorengine
+
+          import android.accessibilityservice.AccessibilityService
+          import android.os.Handler
+          import android.os.Looper
+          import android.os.SystemClock
+          import android.util.Log
+          import android.view.accessibility.AccessibilityEvent
+          import android.view.accessibility.AccessibilityNodeInfo
+          import kotlin.random.Random
+
+          class GacorService : AccessibilityService() {
+
+              companion object {
+                  private const val TAG = "GacorEngine"
+                  private const val TARGET_PKG = "com.taxsee.driver"
+                  private val PRICE_REGEX = Regex("rp\\.?\\s*([0-9][0-9.,]*)")
+              }
+
+              private val handler = Handler(Looper.getMainLooper())
+              private var lastScan = 0L
+              private var cooldownUntil = 0L
+              private var pending = false
+
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+                  if (event == null || !Prefs.isActive(this)) return
+                  if (event.packageName?.toString() != TARGET_PKG) return
+
+                  val now = SystemClock.uptimeMillis()
+                  if (pending || now < cooldownUntil || now - lastScan < 60) return
+                  lastScan = now
+
+                  val root = rootInActiveWindow ?: return
+                  val accept = Prefs.toList(Prefs.accept(this))
+                  val button = findAcceptButton(root, 0, accept) ?: return
+
+                  val screenText = collectText(root, 0).lowercase()
+                  val reject = rejectReason(screenText)
+                  if (reject != null) {
+                      cooldownUntil = now + 1500
+                      Prefs.log(this, "TOLAK: $reject")
+                      return
+                  }
+
+                  val dMin = Prefs.delayMin(this)
+                  val dMax = Prefs.delayMax(this)
+                  val delay = if (dMax <= 0) 0L else Random.nextLong(dMin.toLong(), dMax.toLong() + 1)
+
+                  if (delay == 0L) {
+                      doClick(button)
+                  } else {
+                      pending = true
+                      handler.postDelayed({
+                          pending = false
+                          if (Prefs.isActive(this)) doClick(button)
+                      }, delay)
+                  }
+              }
+
+              private fun doClick(button: AccessibilityNodeInfo) {
+                  try {
+                      button.refresh()
+                      val ok = button.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                      cooldownUntil = SystemClock.uptimeMillis() + 3000
+                      Prefs.log(this, if (ok) "KLIK OK" else "KLIK GAGAL (tombol tidak merespons)")
+                      Log.d(TAG, "klik=$ok")
+                  } catch (e: Exception) {
+                      Prefs.log(this, "ERROR klik: ${e.javaClass.simpleName}")
+                  }
+              }
+
+              private fun findAcceptButton(
+                  node: AccessibilityNodeInfo, depth: Int, words: List<String>
+              ): AccessibilityNodeInfo? {
+                  if (depth > 25) return null
+                  val label = "${node.text ?: ""} ${node.contentDescription ?: ""}".lowercase().trim()
+                  if (label.isNotEmpty() && words.any { label == it || label.startsWith(it) }) {
+                      var n: AccessibilityNodeInfo? = node
+                      var up = 0
+                      while (n != null && up < 4) {
+                          if (n.isClickable && n.isEnabled) return n
+                          n = n.parent
+                          up++
+                      }
+                  }
+                  for (i in 0 until node.childCount) {
+                      val child = node.getChild(i) ?: continue
+                      val found = findAcceptButton(child, depth + 1, words)
+                      if (found != null) return found
+                  }
+                  return null
+              }
+
+              private fun collectText(node: AccessibilityNodeInfo, depth: Int): String {
+                  if (depth > 25) return ""
+                  val sb = StringBuilder()
+                  node.text?.let { sb.append(it).append(' ') }
+                  node.contentDescription?.let { sb.append(it).append(' ') }
+                  for (i in 0 until node.childCount) {
+                      val child = node.getChild(i) ?: continue
+                      sb.append(collectText(child, depth + 1))
+                  }
+                  return sb.toString()
+              }
+
+              private fun rejectReason(text: String): String? {
+                  Prefs.toList(Prefs.exclude(this)).firstOrNull { text.contains(it) }
+                      ?.let { return "kata \"$it\"" }
+
+                  val include = Prefs.toList(Prefs.include(this))
+                  if (include.isNotEmpty() && include.none { text.contains(it) })
+                      return "tidak ada kata kunci ambil"
+
+                  val price = extractPrice(text)
+                  val min = Prefs.minPrice(this)
+                  if (price in 1 until min) return "harga Rp$price < Rp$min"
+                  return null
+              }
+
+              private fun extractPrice(text: String): Int {
+                  val m = PRICE_REGEX.find(text) ?: return 0
+                  val raw = m.groupValues[1].replace(Regex("[.,]00$"), "")
+                  return raw.replace(Regex("[^0-9]"), "").toIntOrNull() ?: 0
+              }
+
+              override fun onInterrupt() { Log.d(TAG, "Layanan terputus") }
+              override fun onServiceConnected() { Prefs.log(this, "Layanan terhubung") }
+          }
+          GACOR_EOF
+          mkdir -p "app/src/main/java/id/karawang/gacorengine"
+          cat > "app/src/main/java/id/karawang/gacorengine/MainActivity.kt" <<'GACOR_EOF'
+          package id.karawang.gacorengine
+
+          import android.content.ComponentName
+          import android.content.Intent
+          import android.content.res.ColorStateList
+          import android.graphics.Color
+          import android.net.Uri
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.TextView
+          import android.widget.Toast
+          import androidx.appcompat.app.AppCompatActivity
+
+          class MainActivity : AppCompatActivity() {
+
+              private lateinit var tvStatus: TextView
+              private lateinit var btnToggle: Button
+              private lateinit var etPrice: EditText
+              private lateinit var etInclude: EditText
+              private lateinit var etExclude: EditText
+              private lateinit var etAccept: EditText
+              private lateinit var etDelayMin: EditText
+              private lateinit var etDelayMax: EditText
+              private lateinit var tvLog: TextView
+
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContentView(R.layout.activity_main)
+
+                  tvStatus = findViewById(R.id.tvStatus)
+                  btnToggle = findViewById(R.id.btnToggle)
+                  etPrice = findViewById(R.id.etPrice)
+                  etInclude = findViewById(R.id.etInclude)
+                  etExclude = findViewById(R.id.etExclude)
+                  etAccept = findViewById(R.id.etAccept)
+                  etDelayMin = findViewById(R.id.etDelayMin)
+                  etDelayMax = findViewById(R.id.etDelayMax)
+                  tvLog = findViewById(R.id.tvLog)
+
+                  etPrice.setText(Prefs.minPrice(this).toString())
+                  etInclude.setText(Prefs.include(this))
+                  etExclude.setText(Prefs.exclude(this))
+                  etAccept.setText(Prefs.accept(this))
+                  etDelayMin.setText(Prefs.delayMin(this).toString())
+                  etDelayMax.setText(Prefs.delayMax(this).toString())
+
+                  findViewById<Button>(R.id.btnAccessibility).setOnClickListener {
+                      startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                  }
+
+                  findViewById<Button>(R.id.btnOverlay).setOnClickListener {
+                      if (!Settings.canDrawOverlays(this)) {
+                          startActivity(
+                              Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
+                          )
+                      } else {
+                          Toast.makeText(this, "Izin overlay sudah aktif", Toast.LENGTH_SHORT).show()
+                      }
+                  }
+
+                  findViewById<Button>(R.id.btnSave).setOnClickListener {
+                      Prefs.saveFilters(
+                          this,
+                          etPrice.text.toString().toIntOrNull() ?: 10000,
+                          etInclude.text.toString(),
+                          etExclude.text.toString(),
+                          etAccept.text.toString(),
+                          etDelayMin.text.toString().toIntOrNull() ?: 0,
+                          etDelayMax.text.toString().toIntOrNull() ?: 80
+                      )
+                      Toast.makeText(this, "Filter disimpan", Toast.LENGTH_SHORT).show()
+                      refreshUi()
+                  }
+
+                  btnToggle.setOnClickListener {
+                      if (!isServiceEnabled()) {
+                          Toast.makeText(this, "Aktifkan aksesibilitas dulu", Toast.LENGTH_LONG).show()
+                          return@setOnClickListener
+                      }
+                      val now = !Prefs.isActive(this)
+                      Prefs.setActive(this, now)
+                      if (now && Settings.canDrawOverlays(this)) {
+                          startService(Intent(this, FloatingWidgetService::class.java))
+                      } else if (!now) {
+                          stopService(Intent(this, FloatingWidgetService::class.java))
+                      }
+                      refreshUi()
+                  }
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  refreshUi()
+              }
+
+              override fun onStart() {
+                  super.onStart()
+                  refreshUi()
+              }
+
+              private fun isServiceEnabled(): Boolean {
+                  val enabled = Settings.Secure.getString(
+                      contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+                  ) ?: return false
+                  val me = ComponentName(this, GacorService::class.java).flattenToString()
+                  return enabled.split(':').any { it.equals(me, ignoreCase = true) }
+              }
+
+              private fun refreshUi() {
+                  val active = Prefs.isActive(this)
+                  val acc = isServiceEnabled()
+                  val overlay = Settings.canDrawOverlays(this)
+
+                  if (active) {
+                      btnToggle.text = "STOP MESIN"
+                      btnToggle.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#EF4444"))
+                  } else {
+                      btnToggle.text = "3. START MESIN"
+                      btnToggle.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#10B981"))
+                  }
+
+                  tvStatus.text = "• Aksesibilitas: ${if (acc) "AKTIF" else "BELUM AKTIF"}\n" +
+                      "• Overlay: ${if (overlay) "AKTIF" else "BELUM AKTIF"}\n" +
+                      "• Mesin: ${if (active) "BERJALAN" else "BERHENTI"}\n" +
+                      "• Harga min: Rp ${Prefs.minPrice(this)}\n" +
+                      "• Jeda klik: ${Prefs.delayMin(this)}-${Prefs.delayMax(this)} ms\n" +
+                      "• Target: Maxim Driver (com.taxsee.driver)"
+                  tvLog.text = Prefs.getLog(this)
+              }
+          }
+          GACOR_EOF
+          mkdir -p "app/src/main/java/id/karawang/gacorengine"
+          cat > "app/src/main/java/id/karawang/gacorengine/Prefs.kt" <<'GACOR_EOF'
+          package id.karawang.gacorengine
+
+          import android.content.Context
+
+          object Prefs {
+              private fun sp(c: Context) = c.getSharedPreferences("gacor", Context.MODE_PRIVATE)
+
+              fun isActive(c: Context) = sp(c).getBoolean("active", false)
+              fun setActive(c: Context, v: Boolean) = sp(c).edit().putBoolean("active", v).apply()
+
+              fun minPrice(c: Context) = sp(c).getInt("min_price", 10000)
+              fun include(c: Context) = sp(c).getString("include", "indomaret, apotek, alfamart, pasar") ?: ""
+              fun exclude(c: Context) = sp(c).getString("exclude", "bandara, perbaikan rating") ?: ""
+              fun accept(c: Context) = sp(c).getString("accept", "minta order, ambil order, terima, lanjut") ?: ""
+              fun delayMin(c: Context) = sp(c).getInt("delay_min", 0)
+              fun delayMax(c: Context) = sp(c).getInt("delay_max", 80)
+
+              fun saveFilters(
+                  c: Context, price: Int, include: String, exclude: String,
+                  accept: String, dMin: Int, dMax: Int
+              ) {
+                  sp(c).edit()
+                      .putInt("min_price", price)
+                      .putString("include", include)
+                      .putString("exclude", exclude)
+                      .putString("accept", accept)
+                      .putInt("delay_min", dMin.coerceAtLeast(0))
+                      .putInt("delay_max", dMax.coerceAtLeast(dMin.coerceAtLeast(0)))
+                      .apply()
+              }
+
+              fun log(c: Context, line: String) {
+                  val t = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())
+                  val old = sp(c).getString("log", "") ?: ""
+                  val lines = (listOf("$t $line") + old.split("\n").filter { it.isNotBlank() }).take(8)
+                  sp(c).edit().putString("log", lines.joinToString("\n")).apply()
+              }
+
+              fun getLog(c: Context) = sp(c).getString("log", "(belum ada)") ?: ""
+
+              fun toList(s: String): List<String> =
+                  s.split(",").map { it.trim().lowercase() }.filter { it.isNotEmpty() }
+          }
+          GACOR_EOF
+          mkdir -p "app/src/main/res/drawable"
+          cat > "app/src/main/res/drawable/ic_launcher.xml" <<'GACOR_EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="96dp" android:height="96dp"
+              android:viewportWidth="96" android:viewportHeight="96">
+              <path android:fillColor="#0F172A" android:pathData="M0,0h96v96h-96z"/>
+              <path android:fillColor="#00E676" android:pathData="M54,10L26,54h18l-6,32 32,-46H50z"/>
+          </vector>
+          GACOR_EOF
+          mkdir -p "app/src/main/res/layout"
+          cat > "app/src/main/res/layout/activity_main.xml" <<'GACOR_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:background="#0F172A"
+              android:fillViewport="true">
+
+              <LinearLayout
+                  android:layout_width="match_parent"
+                  android:layout_height="wrap_content"
+                  android:orientation="vertical"
+                  android:padding="16dp">
+
+                  <TextView
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:layout_marginTop="12dp"
+                      android:gravity="center"
+                      android:text="KARAWANG GACOR ENGINE"
+                      android:textColor="#00E676"
+                      android:textSize="22sp"
+                      android:textStyle="bold" />
+
+                  <TextView
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:layout_marginBottom="20dp"
+                      android:gravity="center"
+                      android:text="Private Driver Edition v2.1"
+                      android:textColor="#94A3B8"
+                      android:textSize="12sp" />
+
+                  <Button
+                      android:id="@+id/btnAccessibility"
+                      android:layout_width="match_parent"
+                      android:layout_height="52dp"
+                      android:layout_marginBottom="10dp"
+                      android:backgroundTint="#F59E0B"
+                      android:text="1. AKTIFKAN AKSESIBILITAS"
+                      android:textStyle="bold" />
+
+                  <Button
+                      android:id="@+id/btnOverlay"
+                      android:layout_width="match_parent"
+                      android:layout_height="52dp"
+                      android:layout_marginBottom="10dp"
+                      android:backgroundTint="#3B82F6"
+                      android:text="2. IZIN TOMBOL MELAYANG"
+                      android:textStyle="bold" />
+
+                  <Button
+                      android:id="@+id/btnToggle"
+                      android:layout_width="match_parent"
+                      android:layout_height="58dp"
+                      android:layout_marginBottom="20dp"
+                      android:backgroundTint="#10B981"
+                      android:text="3. START MESIN"
+                      android:textStyle="bold" />
+
+                  <LinearLayout
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:layout_marginBottom="16dp"
+                      android:background="#1E293B"
+                      android:orientation="vertical"
+                      android:padding="16dp">
+
+                      <TextView
+                          android:layout_width="wrap_content"
+                          android:layout_height="wrap_content"
+                          android:text="FILTER"
+                          android:textColor="#FFFFFF"
+                          android:textStyle="bold" />
+
+                      <TextView
+                          android:layout_width="wrap_content"
+                          android:layout_height="wrap_content"
+                          android:layout_marginTop="8dp"
+                          android:text="Harga minimal (Rp)"
+                          android:textColor="#94A3B8"
+                          android:textSize="12sp" />
+
+                      <EditText
+                          android:id="@+id/etPrice"
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:inputType="number"
+                          android:textColor="#FFFFFF" />
+
+                      <TextView
+                          android:layout_width="wrap_content"
+                          android:layout_height="wrap_content"
+                          android:layout_marginTop="8dp"
+                          android:text="Kata kunci ambil (pisah koma, kosong = semua)"
+                          android:textColor="#94A3B8"
+                          android:textSize="12sp" />
+
+                      <EditText
+                          android:id="@+id/etInclude"
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:inputType="text"
+                          android:textColor="#FFFFFF" />
+
+                      <TextView
+                          android:layout_width="wrap_content"
+                          android:layout_height="wrap_content"
+                          android:layout_marginTop="8dp"
+                          android:text="Kata kunci tolak (pisah koma)"
+                          android:textColor="#94A3B8"
+                          android:textSize="12sp" />
+
+                      <EditText
+                          android:id="@+id/etExclude"
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:inputType="text"
+                          android:textColor="#FFFFFF" />
+
+
+                      <TextView
+                          android:layout_width="wrap_content"
+                          android:layout_height="wrap_content"
+                          android:layout_marginTop="8dp"
+                          android:text="Teks tombol ambil order (pisah koma)"
+                          android:textColor="#94A3B8"
+                          android:textSize="12sp" />
+
+                      <EditText
+                          android:id="@+id/etAccept"
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:inputType="text"
+                          android:textColor="#FFFFFF" />
+
+                      <TextView
+                          android:layout_width="wrap_content"
+                          android:layout_height="wrap_content"
+                          android:layout_marginTop="8dp"
+                          android:text="Jeda klik minimal (ms, 0 = langsung)"
+                          android:textColor="#94A3B8"
+                          android:textSize="12sp" />
+
+                      <EditText
+                          android:id="@+id/etDelayMin"
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:inputType="number"
+                          android:textColor="#FFFFFF" />
+
+                      <TextView
+                          android:layout_width="wrap_content"
+                          android:layout_height="wrap_content"
+                          android:layout_marginTop="8dp"
+                          android:text="Jeda klik maksimal (ms)"
+                          android:textColor="#94A3B8"
+                          android:textSize="12sp" />
+
+                      <EditText
+                          android:id="@+id/etDelayMax"
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:inputType="number"
+                          android:textColor="#FFFFFF" />
+
+                      <Button
+                          android:id="@+id/btnSave"
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:layout_marginTop="12dp"
+                          android:backgroundTint="#6366F1"
+                          android:text="SIMPAN FILTER" />
+                  </LinearLayout>
+
+                  <LinearLayout
+                      android:layout_width="match_parent"
+                      android:layout_height="wrap_content"
+                      android:background="#1E293B"
+                      android:orientation="vertical"
+                      android:padding="16dp">
+
+                      <TextView
+                          android:layout_width="wrap_content"
+                          android:layout_height="wrap_content"
+                          android:text="STATUS"
+                          android:textColor="#FFFFFF"
+                          android:textStyle="bold" />
+
+                      <TextView
+                          android:id="@+id/tvStatus"
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:layout_marginTop="8dp"
+                          android:textColor="#CBD5E1"
+                          android:textSize="13sp" />
+
+                      <TextView
+                          android:layout_width="wrap_content"
+                          android:layout_height="wrap_content"
+                          android:layout_marginTop="12dp"
+                          android:text="LOG TERAKHIR (untuk cek tombol/filter)"
+                          android:textColor="#FFFFFF"
+                          android:textStyle="bold" />
+
+                      <TextView
+                          android:id="@+id/tvLog"
+                          android:layout_width="match_parent"
+                          android:layout_height="wrap_content"
+                          android:layout_marginTop="6dp"
+                          android:textColor="#94A3B8"
+                          android:textSize="11sp" />
+                  </LinearLayout>
+              </LinearLayout>
+          </ScrollView>
+          GACOR_EOF
+          mkdir -p "app/src/main/res/layout"
+          cat > "app/src/main/res/layout/widget_floating.xml" <<'GACOR_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <Button xmlns:android="http://schemas.android.com/apk/res/android"
+              android:id="@+id/btnWidgetToggle"
+              android:layout_width="90dp"
+              android:layout_height="42dp"
+              android:backgroundTint="#10B981"
+              android:padding="0dp"
+              android:text="SIKAT: ON"
+              android:textColor="#FFFFFF"
+              android:textSize="11sp"
+              android:textStyle="bold" />
+          GACOR_EOF
+          mkdir -p "app/src/main/res/values"
+          cat > "app/src/main/res/values/strings.xml" <<'GACOR_EOF'
+          <resources>
+              <string name="app_name">Karawang Gacor Engine</string>
+              <string name="service_desc">Membaca layar aplikasi Maxim Driver untuk menyaring dan menekan tombol ambil order sesuai filter Anda.</string>
+          </resources>
+          GACOR_EOF
+          mkdir -p "app/src/main/res/values"
+          cat > "app/src/main/res/values/themes.xml" <<'GACOR_EOF'
+          <resources>
+              <style name="Theme.Gacor" parent="Theme.MaterialComponents.DayNight.NoActionBar" />
+          </resources>
+          GACOR_EOF
+          mkdir -p "app/src/main/res/xml"
+          cat > "app/src/main/res/xml/accessibility_service_config.xml" <<'GACOR_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowContentChanged|typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:accessibilityFlags="flagRetrieveInteractiveWindows|flagIncludeNotImportantViews"
+              android:canRetrieveWindowContent="true"
+              android:description="@string/service_desc"
+              android:packageNames="com.taxsee.driver"
+              android:notificationTimeout="50" />
+          GACOR_EOF
+          cat > "build.gradle" <<'GACOR_EOF'
+          plugins {
+              id 'com.android.application' version '8.2.2' apply false
+              id 'org.jetbrains.kotlin.android' version '1.9.22' apply false
+          }
+          GACOR_EOF
+          cat > "gradle.properties" <<'GACOR_EOF'
+          org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          kotlin.code.style=official
+          GACOR_EOF
+          cat > "settings.gradle" <<'GACOR_EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "KarawangGacorEngine"
+          include ':app'
+          GACOR_EOF
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v3
+        with:
+          gradle-version: 8.4
+      - name: Build
+        working-directory: gacor_build
+        run: gradle assembleDebug --no-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KarawangGacorEngine-APK
+          path: gacor_build/app/build/outputs/apk/debug/*.apk
