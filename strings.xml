@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Karawang Gacor Engine</string>
+    <string name="service_desc">Membaca layar aplikasi Maxim Driver untuk menyaring dan menekan tombol ambil order sesuai filter Anda.</string>
+</resources>
