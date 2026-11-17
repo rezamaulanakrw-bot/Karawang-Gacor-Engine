@@ -25,8 +25,8 @@ jobs:
                   applicationId "id.karawang.gacorengine"
                   minSdk 26
                   targetSdk 34
-                  versionCode 5
-                  versionName "3.0"
+                  versionCode 7
+                  versionName "3.2"
               }
 
               buildTypes {
@@ -46,6 +46,8 @@ jobs:
               implementation 'androidx.core:core-ktx:1.12.0'
               implementation 'androidx.appcompat:appcompat:1.6.1'
               implementation 'com.google.android.material:material:1.11.0'
+              implementation 'dev.rikka.shizuku:api:13.1.5'
+              implementation 'dev.rikka.shizuku:provider:13.1.5'
           }
           GACOR_EOF
           mkdir -p "app"
@@ -55,10 +57,18 @@ jobs:
           mkdir -p "app/src/main"
           cat > "app/src/main/AndroidManifest.xml" <<'GACOR_EOF'
           <?xml version="1.0" encoding="utf-8"?>
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              xmlns:tools="http://schemas.android.com/tools">
 
               <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
               <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission
+                  android:name="android.permission.WRITE_SECURE_SETTINGS"
+                  tools:ignore="ProtectedPermissions" />
+
+              <queries>
+                  <package android:name="moe.shizuku.privileged.api" />
+              </queries>
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
               <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
@@ -91,6 +101,14 @@ jobs:
                           android:name="android.accessibilityservice"
                           android:resource="@xml/accessibility_service_config" />
                   </service>
+
+                  <provider
+                      android:name="rikka.shizuku.ShizukuProvider"
+                      android:authorities="${applicationId}.shizuku"
+                      android:enabled="true"
+                      android:exported="true"
+                      android:multiprocess="false"
+                      android:permission="android.permission.INTERACT_ACROSS_USERS_FULL" />
 
                   <service
                       android:name=".GuardService"
@@ -133,8 +151,8 @@ jobs:
                   "confirm_words" to "ya bisa, bisa",
                   "confirm_ms" to "8000",
                   "delay_min" to "0", "delay_max" to "80",
-                  "scan_ms" to "60", "cooldown_ms" to "2500",
-                  "fail_limit" to "5",
+                  "scan_ms" to "100", "cooldown_ms" to "2500",
+                  "fail_limit" to "5", "deep_scan" to "0",
                   "sched_on" to "0", "sched_start" to "6", "sched_end" to "22"
               )
 
@@ -288,7 +306,7 @@ jobs:
               private val refresh = object : Runnable {
                   override fun run() {
                       updateToggle()
-                      handler.postDelayed(this, 1000)
+                      handler.postDelayed(this, 1500)
                   }
               }
 
@@ -432,6 +450,9 @@ jobs:
               private var fails = 0
               private var lastLogMsg = ""
               private var lastLogAt = 0L
+              private var acceptWords: List<String> = emptyList()
+              private var confirmWords: List<String> = emptyList()
+              private var cfgAt = 0L
 
               // ------------------------------------------------------------------
               override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -446,12 +467,18 @@ jobs:
                   lastScan = now
                   if (pending) return
 
+                  if (now - cfgAt > 1500 || acceptWords.isEmpty()) {
+                      acceptWords = Cfg.list(this, "accept_words")
+                      confirmWords = Cfg.list(this, "confirm_words")
+                      cfgAt = now
+                  }
+
                   val root = rootInActiveWindow ?: return
                   val dry = Cfg.b(this, "dry")
 
                   // Langkah konfirmasi (hanya sesaat setelah klik ambil order)
                   if (lastAcceptAt > 0 && now - lastAcceptAt < Cfg.i(this, "confirm_ms") && now > confirmUntil) {
-                      val c = findButton(root, 0, Cfg.list(this, "confirm_words"), true)
+                      val c = findButton(root, confirmWords, true)
                       if (c != null) {
                           confirmUntil = now + 800
                           if (dry) {
@@ -464,7 +491,7 @@ jobs:
                       }
                   }
 
-                  val hit = findButton(root, 0, Cfg.list(this, "accept_words"), false) ?: return
+                  val hit = findButton(root, acceptWords, false) ?: return
                   val same = hit.label == lastLabel
                   if (same && now - lastClickAt < Cfg.i(this, "cooldown_ms")) return
                   if (!same && now - lastClickAt < 400) return
@@ -620,7 +647,31 @@ jobs:
                   return words.any { s == it || (!exact && s.startsWith(it)) }
               }
 
-              private fun findButton(
+              // Jalur cepat: pencarian teks bawaan sistem (ringan untuk HP RAM kecil)
+              private fun findButton(root: AccessibilityNodeInfo, words: List<String>, exact: Boolean): Hit? {
+                  if (Cfg.b(this, "deep_scan")) return findButtonDeep(root, 0, words, exact)
+                  for (w in words) {
+                      val nodes = try { root.findAccessibilityNodeInfosByText(w) } catch (e: Exception) { null }
+                      if (nodes == null) continue
+                      for (n in nodes) {
+                          val t = n.text?.toString()?.lowercase()?.trim() ?: ""
+                          val d = n.contentDescription?.toString()?.lowercase()?.trim() ?: ""
+                          val label = if (matches(t, words, exact)) t else if (matches(d, words, exact)) d else ""
+                          if (label.isEmpty()) continue
+                          var x: AccessibilityNodeInfo? = n
+                          var up = 0
+                          while (x != null && up < 4) {
+                              if (x.isClickable && x.isEnabled) return Hit(x, label)
+                              x = x.parent
+                              up++
+                          }
+                      }
+                  }
+                  return null
+              }
+
+              // Jalur dalam: telusuri seluruh pohon tampilan (lebih berat)
+              private fun findButtonDeep(
                   node: AccessibilityNodeInfo, depth: Int, words: List<String>, exact: Boolean
               ): Hit? {
                   if (depth > 25) return null
@@ -638,7 +689,7 @@ jobs:
                   }
                   for (i in 0 until node.childCount) {
                       val child = node.getChild(i) ?: continue
-                      val found = findButton(child, depth + 1, words, exact)
+                      val found = findButtonDeep(child, depth + 1, words, exact)
                       if (found != null) return found
                   }
                   return null
@@ -729,7 +780,10 @@ jobs:
                   override fun run() {
                       val ctx = this@GuardService
                       val active = Cfg.b(ctx, "active")
-                      val acc = Util.isAccessibilityOn(ctx)
+                      var acc = Util.isAccessibilityOn(ctx)
+                      if (!acc && active && Util.enableAccessibility(ctx)) {
+                          acc = Util.isAccessibilityOn(ctx)
+                      }
                       val dry = if (Cfg.b(ctx, "dry")) " (simulasi)" else ""
                       val text = when {
                           !acc -> "PERINGATAN: aksesibilitas mati"
@@ -749,7 +803,7 @@ jobs:
                           alerted = false
                           Notifier.cancel(ctx, Notifier.ID_ALERT_ACC)
                       }
-                      handler.postDelayed(this, 5000)
+                      handler.postDelayed(this, 8000)
                   }
               }
 
@@ -800,9 +854,11 @@ jobs:
           import android.widget.ScrollView
           import android.widget.TextView
           import android.widget.Toast
+          import androidx.appcompat.app.AlertDialog
           import androidx.appcompat.app.AppCompatActivity
           import androidx.appcompat.widget.SwitchCompat
           import androidx.core.content.ContextCompat
+          import rikka.shizuku.Shizuku
 
           class MainActivity : AppCompatActivity() {
 
@@ -813,6 +869,7 @@ jobs:
               private lateinit var tvStats: TextView
               private lateinit var tvSnap: TextView
               private lateinit var tvLog: TextView
+              private lateinit var tvShizuku: TextView
               private lateinit var btnToggle: Button
               private val ui = Handler(Looper.getMainLooper())
 
@@ -918,9 +975,20 @@ jobs:
 
                   val title = label(root, "KARAWANG GACOR ENGINE", 22f, 0xFF00E676.toInt(), true, 8)
                   title.gravity = android.view.Gravity.CENTER
-                  val sub = label(root, "Bike & Delivery • v3.0 • offline, tanpa server", 12f, 0xFF94A3B8.toInt(), false, 0)
+                  val sub = label(root, "Bike & Delivery • v3.2 • offline, tanpa server", 12f, 0xFF94A3B8.toInt(), false, 0)
                   sub.gravity = android.view.Gravity.CENTER
                   root.addView(TextView(this), lp(0, 8))
+
+                  // ---- setup paksa (Shizuku / App Ops)
+                  val setup = card("SETUP PAKSA (SHIZUKU / APP OPS)")
+                  label(setup,
+                      "Untuk HP yang aksesibilitasnya terkunci. Jalankan Shizuku dulu, lalu tekan tombol pink. " +
+                          "Aplikasi memberi dirinya izin yang diperlukan dan menyalakan aksesibilitas sendiri.",
+                      11f, 0xFF94A3B8.toInt(), false, 6)
+                  tvShizuku = label(setup, "", 12f, 0xFFCBD5E1.toInt(), false, 8)
+                  button(setup, "SETUP OTOMATIS VIA SHIZUKU", 0xFFEC4899.toInt(), 54) { startShizukuSetup() }
+                  button(setup, "AKTIFKAN AKSESIBILITAS OTOMATIS", 0xFFF59E0B.toInt(), 46) { autoEnableAcc() }
+                  button(setup, "SALIN PERINTAH MANUAL (ADB / TERMUX)", 0xFF475569.toInt(), 40) { copyCommands() }
 
                   // ---- kontrol
                   val kontrol = card("KONTROL")
@@ -981,6 +1049,7 @@ jobs:
 
                   // ---- kecepatan
                   val cepat = card("KECEPATAN & TOMBOL")
+                  sw(cepat, "Pindai mendalam (lebih berat, pakai bila tombol tidak terbaca)", "deep_scan")
                   field(cepat, "Jeda klik minimal (ms, 0 = langsung)", "delay_min", 1)
                   field(cepat, "Jeda klik maksimal (ms)", "delay_max", 1)
                   field(cepat, "Interval baca layar (ms)", "scan_ms", 1)
@@ -1035,12 +1104,83 @@ jobs:
                   val lg = card("LOG TERAKHIR")
                   tvLog = label(lg, "", 11f, 0xFFCBD5E1.toInt(), false, 8)
 
+                  try {
+                      Shizuku.addRequestPermissionResultListener(shizukuListener)
+                  } catch (e: Throwable) {
+                  }
+
                   if (Build.VERSION.SDK_INT >= 33 &&
                       ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
                       != PackageManager.PERMISSION_GRANTED
                   ) {
                       requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 11)
                   }
+              }
+
+              private val shizukuListener = Shizuku.OnRequestPermissionResultListener { _, result ->
+                  runOnUiThread {
+                      if (result == PackageManager.PERMISSION_GRANTED) {
+                          startShizukuSetup()
+                      } else {
+                          Toast.makeText(this, "Izin Shizuku ditolak", Toast.LENGTH_LONG).show()
+                      }
+                  }
+              }
+
+              private fun startShizukuSetup() {
+                  if (!ShizukuHelper.isRunning()) {
+                      Toast.makeText(this, "Shizuku belum berjalan. Buka aplikasi Shizuku lalu Start.", Toast.LENGTH_LONG).show()
+                      return
+                  }
+                  if (!ShizukuHelper.hasPermission()) {
+                      try {
+                          Shizuku.requestPermission(21)
+                      } catch (e: Throwable) {
+                          Toast.makeText(this, "Gagal meminta izin Shizuku", Toast.LENGTH_LONG).show()
+                      }
+                      return
+                  }
+                  Toast.makeText(this, "Menjalankan setup...", Toast.LENGTH_SHORT).show()
+                  ShizukuHelper.runSetup(applicationContext) { msg ->
+                      runOnUiThread {
+                          Cfg.log(this, "Setup Shizuku selesai")
+                          AlertDialog.Builder(this)
+                              .setTitle("Hasil setup")
+                              .setMessage(msg)
+                              .setPositiveButton("OK", null)
+                              .show()
+                          refreshUi()
+                      }
+                  }
+              }
+
+              private fun autoEnableAcc() {
+                  if (Util.enableAccessibility(this)) {
+                      Toast.makeText(this, "Aksesibilitas diaktifkan", Toast.LENGTH_SHORT).show()
+                      refreshUi()
+                  } else {
+                      Toast.makeText(
+                          this,
+                          "Izin ubah setelan aman belum ada. Jalankan SETUP OTOMATIS VIA SHIZUKU dulu.",
+                          Toast.LENGTH_LONG
+                      ).show()
+                  }
+              }
+
+              private fun copyCommands() {
+                  val sb = StringBuilder()
+                  for (c in ShizukuHelper.commands(packageName)) sb.append(c.second).append('\n')
+                  val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                  cm.setPrimaryClip(ClipData.newPlainText("perintah", sb.toString()))
+                  Toast.makeText(this, "Perintah disalin. Jalankan dengan adb shell atau rish (Termux).", Toast.LENGTH_LONG).show()
+              }
+
+              override fun onDestroy() {
+                  try {
+                      Shizuku.removeRequestPermissionResultListener(shizukuListener)
+                  } catch (e: Throwable) {
+                  }
+                  super.onDestroy()
               }
 
               override fun onResume() {
@@ -1059,7 +1199,7 @@ jobs:
                   // simpan dulu isi kolom agar pengaturan terbaru terpakai
                   for (f in fields) Cfg.set(this, f.first, f.second.text.toString())
 
-                  if (!Util.isAccessibilityOn(this)) {
+                  if (!Util.isAccessibilityOn(this) && !Util.enableAccessibility(this)) {
                       Toast.makeText(this, "Aktifkan aksesibilitas dulu", Toast.LENGTH_LONG).show()
                       return
                   }
@@ -1101,6 +1241,9 @@ jobs:
                       "• Jeda klik: ${Cfg.i(this, "delay_min")}-${Cfg.i(this, "delay_max")} ms\n" +
                       "• Jadwal: $jadwal\n" +
                       "• Target: Maxim Driver (${GacorService.TARGET_PKG})"
+                  tvShizuku.text = "• Shizuku: ${if (ShizukuHelper.isRunning()) "JALAN" else "belum jalan"}" +
+                      " • izin: ${if (ShizukuHelper.hasPermission()) "OK" else "belum"}\n" +
+                      "• Izin ubah setelan aman: ${if (Util.hasSecureSettings(this)) "ADA" else "belum"}"
                   tvStats.text = Cfg.statsText(this)
                   val sn = Cfg.s(this, "snapshot")
                   tvSnap.text = if (sn.isBlank()) "(belum ada snapshot)" else sn
@@ -1178,11 +1321,80 @@ jobs:
           }
           GACOR_EOF
           mkdir -p "app/src/main/java/id/karawang/gacorengine"
+          cat > "app/src/main/java/id/karawang/gacorengine/ShizukuHelper.kt" <<'GACOR_EOF'
+          package id.karawang.gacorengine
+
+          import android.content.Context
+          import android.content.pm.PackageManager
+          import rikka.shizuku.Shizuku
+
+          object ShizukuHelper {
+
+              fun isRunning(): Boolean = try {
+                  Shizuku.pingBinder()
+              } catch (e: Throwable) {
+                  false
+              }
+
+              fun hasPermission(): Boolean = try {
+                  isRunning() && Shizuku.checkSelfPermission() == PackageManager.PERMISSION_GRANTED
+              } catch (e: Throwable) {
+                  false
+              }
+
+              // pasangan (nama singkat, perintah)
+              fun commands(pkg: String): List<Pair<String, String>> = listOf(
+                  Pair("Izin pengaturan terbatas", "appops set $pkg ACCESS_RESTRICTED_SETTINGS allow"),
+                  Pair("Izin tombol melayang", "appops set $pkg SYSTEM_ALERT_WINDOW allow"),
+                  Pair("Izin ubah setelan aman", "pm grant $pkg android.permission.WRITE_SECURE_SETTINGS"),
+                  Pair("Izin notifikasi", "pm grant $pkg android.permission.POST_NOTIFICATIONS"),
+                  Pair("Bebas hemat baterai", "dumpsys deviceidle whitelist +$pkg")
+              )
+
+              private fun exec(cmd: String): String {
+                  val m = Shizuku::class.java.getDeclaredMethod(
+                      "newProcess",
+                      Array<String>::class.java, Array<String>::class.java, String::class.java
+                  )
+                  m.isAccessible = true
+                  val p = m.invoke(null, arrayOf("sh", "-c", cmd), null, null) as Process
+                  val out = p.inputStream.bufferedReader().readText()
+                  val err = p.errorStream.bufferedReader().readText()
+                  p.waitFor()
+                  return (out + err).trim()
+              }
+
+              fun runSetup(ctx: Context, done: (String) -> Unit) {
+                  Thread {
+                      val sb = StringBuilder()
+                      try {
+                          for (c in commands(ctx.packageName)) {
+                              val r = exec(c.second)
+                              sb.append("• ").append(c.first).append(": ")
+                                  .append(if (r.isEmpty()) "OK" else r.take(70)).append('\n')
+                          }
+                      } catch (e: Throwable) {
+                          sb.append("Gagal menjalankan perintah: ").append(e.javaClass.simpleName)
+                              .append(' ').append(e.message ?: "").append('\n')
+                      }
+                      val enabled = Util.enableAccessibility(ctx)
+                      sb.append(
+                          if (enabled) "• Aksesibilitas: DIAKTIFKAN otomatis"
+                          else "• Aksesibilitas: belum aktif (izin ubah setelan aman belum diberikan)"
+                      )
+                      done(sb.toString())
+                  }.start()
+              }
+          }
+          GACOR_EOF
+          mkdir -p "app/src/main/java/id/karawang/gacorengine"
           cat > "app/src/main/java/id/karawang/gacorengine/Util.kt" <<'GACOR_EOF'
           package id.karawang.gacorengine
 
+          import android.Manifest
           import android.content.ComponentName
           import android.content.Context
+          import android.content.pm.PackageManager
           import android.provider.Settings
 
           object Util {
@@ -1192,6 +1404,30 @@ jobs:
                   ) ?: return false
                   val me = ComponentName(c, GacorService::class.java).flattenToString()
                   return enabled.split(':').any { it.equals(me, ignoreCase = true) }
+              }
+
+              fun hasSecureSettings(c: Context): Boolean =
+                  c.checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS) == PackageManager.PERMISSION_GRANTED
+
+              // Menyalakan layanan aksesibilitas sendiri. Butuh WRITE_SECURE_SETTINGS
+              // (diberikan lewat Shizuku / ADB, lihat kartu SETUP PAKSA).
+              fun enableAccessibility(c: Context): Boolean {
+                  if (!hasSecureSettings(c)) return false
+                  return try {
+                      val me = ComponentName(c, GacorService::class.java).flattenToString()
+                      val cur = Settings.Secure.getString(
+                          c.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+                      ) ?: ""
+                      val list = cur.split(':').filter { it.isNotBlank() }.toMutableList()
+                      if (!list.any { it.equals(me, ignoreCase = true) }) list.add(me)
+                      Settings.Secure.putString(
+                          c.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, list.joinToString(":")
+                      )
+                      Settings.Secure.putString(c.contentResolver, Settings.Secure.ACCESSIBILITY_ENABLED, "1")
+                      true
+                  } catch (e: Exception) {
+                      false
+                  }
               }
           }
           GACOR_EOF
