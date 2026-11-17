@@ -25,8 +25,8 @@ jobs:
                   applicationId "id.karawang.gacorengine"
                   minSdk 26
                   targetSdk 34
-                  versionCode 3
-                  versionName "2.1"
+                  versionCode 5
+                  versionName "3.0"
               }
 
               buildTypes {
@@ -58,6 +58,9 @@ jobs:
           <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
               <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
               <application
                   android:allowBackup="false"
@@ -90,10 +93,132 @@ jobs:
                   </service>
 
                   <service
+                      android:name=".GuardService"
+                      android:exported="false"
+                      android:foregroundServiceType="specialUse">
+                      <property
+                          android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                          android:value="driver_order_assistant" />
+                  </service>
+
+                  <service
                       android:name=".FloatingWidgetService"
                       android:exported="false" />
               </application>
           </manifest>
+          GACOR_EOF
+          mkdir -p "app/src/main/java/id/karawang/gacorengine"
+          cat > "app/src/main/java/id/karawang/gacorengine/Cfg.kt" <<'GACOR_EOF'
+          package id.karawang.gacorengine
+
+          import android.content.Context
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+
+          object Cfg {
+
+              private val D: Map<String, String> = mapOf(
+                  "active" to "0",
+                  "dry" to "0",
+                  "bike_on" to "1", "bike_min" to "8000", "bike_pick_km" to "3",
+                  "bike_inc" to "", "bike_exc" to "",
+                  "del_on" to "1", "del_min" to "10000", "del_pick_km" to "4",
+                  "del_inc" to "", "del_exc" to "",
+                  "other_on" to "0", "other_min" to "15000",
+                  "global_exc" to "bandara, perbaikan rating",
+                  "kw_delivery" to "delivery, kurir, express, food, makanan, barang, paket, titip, belanja",
+                  "kw_other" to "car, mobil, taksi, truk, cargo",
+                  "accept_words" to "minta order, ambil order, terima, lanjut",
+                  "confirm_words" to "ya bisa, bisa",
+                  "confirm_ms" to "8000",
+                  "delay_min" to "0", "delay_max" to "80",
+                  "scan_ms" to "60", "cooldown_ms" to "2500",
+                  "fail_limit" to "5",
+                  "sched_on" to "0", "sched_start" to "6", "sched_end" to "22"
+              )
+
+              private fun sp(c: Context) = c.getSharedPreferences("gacor3", Context.MODE_PRIVATE)
+
+              fun s(c: Context, key: String): String = sp(c).getString(key, D[key] ?: "") ?: ""
+              fun set(c: Context, key: String, v: String) = sp(c).edit().putString(key, v).apply()
+              fun b(c: Context, key: String): Boolean = s(c, key) == "1"
+              fun i(c: Context, key: String): Int =
+                  s(c, key).trim().toIntOrNull() ?: (D[key]?.toIntOrNull() ?: 0)
+              fun d(c: Context, key: String): Double =
+                  s(c, key).trim().replace(',', '.').toDoubleOrNull() ?: (D[key]?.toDoubleOrNull() ?: 0.0)
+              fun list(c: Context, key: String): List<String> =
+                  s(c, key).split(",").map { it.trim().lowercase() }.filter { it.isNotEmpty() }
+
+              fun resetDefaults(c: Context) {
+                  val e = sp(c).edit()
+                  for (k in D.keys) {
+                      if (k != "active") e.remove(k)
+                  }
+                  e.apply()
+              }
+
+              // ---------- statistik harian ----------
+              private fun today(): String = SimpleDateFormat("yyyyMMdd", Locale.US).format(Date())
+
+              private fun roll(c: Context) {
+                  if (s(c, "stat_date") != today()) {
+                      sp(c).edit()
+                          .putString("stat_date", today())
+                          .putString("stat_clicks", "0").putString("stat_sum", "0")
+                          .putString("stat_bike", "0").putString("stat_del", "0")
+                          .putString("stat_other", "0").putString("stat_rej", "0")
+                          .apply()
+                  }
+              }
+
+              fun resetStats(c: Context) {
+                  set(c, "stat_date", "")
+                  roll(c)
+              }
+
+              fun addClick(c: Context, type: String, price: Int) {
+                  roll(c)
+                  val e = sp(c).edit()
+                  e.putString("stat_clicks", (i(c, "stat_clicks") + 1).toString())
+                  e.putString("stat_sum", (i(c, "stat_sum") + price).toString())
+                  val k = when (type) { "bike" -> "stat_bike"; "del" -> "stat_del"; else -> "stat_other" }
+                  e.putString(k, (i(c, k) + 1).toString())
+                  e.apply()
+              }
+
+              fun addReject(c: Context) {
+                  roll(c)
+                  set(c, "stat_rej", (i(c, "stat_rej") + 1).toString())
+              }
+
+              fun todayClicks(c: Context): Int {
+                  roll(c)
+                  return i(c, "stat_clicks")
+              }
+
+              fun statsText(c: Context): String {
+                  roll(c)
+                  val sum = i(c, "stat_sum")
+                  return "Order diklik: ${i(c, "stat_clicks")}  (Bike ${i(c, "stat_bike")}, " +
+                      "Delivery ${i(c, "stat_del")}, Lain ${i(c, "stat_other")})\n" +
+                      "Perkiraan nilai order: Rp ${"%,d".format(sum)}\n" +
+                      "Ditolak filter: ${i(c, "stat_rej")}"
+              }
+
+              // ---------- log ----------
+              fun log(c: Context, line: String) {
+                  val t = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
+                  val old = s(c, "log")
+                  val lines = (listOf("$t $line") + old.split("\n").filter { it.isNotBlank() }).take(12)
+                  set(c, "log", lines.joinToString("\n"))
+              }
+
+              fun getLog(c: Context): String {
+                  val l = s(c, "log")
+                  return if (l.isBlank()) "(belum ada)" else l
+              }
+          }
           GACOR_EOF
           mkdir -p "app/src/main/java/id/karawang/gacorengine"
           cat > "app/src/main/java/id/karawang/gacorengine/FloatingWidgetService.kt" <<'GACOR_EOF'
@@ -102,29 +227,99 @@ jobs:
           import android.annotation.SuppressLint
           import android.app.Service
           import android.content.Intent
-          import android.content.res.ColorStateList
           import android.graphics.Color
           import android.graphics.PixelFormat
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
+          import android.os.Handler
           import android.os.IBinder
+          import android.os.Looper
           import android.view.Gravity
-          import android.view.LayoutInflater
           import android.view.MotionEvent
-          import android.view.View
           import android.view.WindowManager
           import android.widget.Button
+          import android.widget.LinearLayout
+          import android.widget.TextView
+          import android.widget.Toast
 
           class FloatingWidgetService : Service() {
 
               private var wm: WindowManager? = null
-              private var view: View? = null
+              private var row: LinearLayout? = null
+              private val handler = Handler(Looper.getMainLooper())
+              private var toggle: Button? = null
+
+              private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+              private fun bg(color: Int): GradientDrawable {
+                  val g = GradientDrawable()
+                  g.setColor(color)
+                  g.cornerRadius = dp(8).toFloat()
+                  return g
+              }
+
+              private fun smallBtn(label: String, color: Int): Button {
+                  val b = Button(this)
+                  b.text = label
+                  b.textSize = 11f
+                  b.setTextColor(Color.WHITE)
+                  b.setTypeface(null, Typeface.BOLD)
+                  b.setPadding(0, 0, 0, 0)
+                  b.minWidth = 0
+                  b.minHeight = 0
+                  b.minimumWidth = 0
+                  b.minimumHeight = 0
+                  b.isAllCaps = false
+                  b.background = bg(color)
+                  return b
+              }
+
+              private fun updateToggle() {
+                  val t = toggle ?: return
+                  if (Cfg.b(this, "active")) {
+                      t.text = "SIKAT: ON"
+                      t.background = bg(0xFF10B981.toInt())
+                  } else {
+                      t.text = "SIKAT: OFF"
+                      t.background = bg(0xFFEF4444.toInt())
+                  }
+              }
+
+              private val refresh = object : Runnable {
+                  override fun run() {
+                      updateToggle()
+                      handler.postDelayed(this, 1000)
+                  }
+              }
 
               override fun onBind(intent: Intent?): IBinder? = null
 
               @SuppressLint("ClickableViewAccessibility")
               override fun onCreate() {
                   super.onCreate()
-                  val v = LayoutInflater.from(this).inflate(R.layout.widget_floating, null)
-                  view = v
+
+                  val r = LinearLayout(this)
+                  r.orientation = LinearLayout.HORIZONTAL
+                  r.gravity = Gravity.CENTER_VERTICAL
+                  r.background = bg(0xCC0F172A.toInt())
+                  r.setPadding(dp(4), dp(4), dp(6), dp(4))
+
+                  val handle = TextView(this)
+                  handle.text = "≡"
+                  handle.textSize = 22f
+                  handle.setTextColor(Color.WHITE)
+                  handle.setPadding(dp(8), 0, dp(10), 0)
+
+                  val tg = smallBtn("SIKAT: OFF", 0xFFEF4444.toInt())
+                  toggle = tg
+                  val snap = smallBtn("SNAP", 0xFF3B82F6.toInt())
+
+                  r.addView(handle)
+                  r.addView(tg, LinearLayout.LayoutParams(dp(84), dp(38)))
+                  val lpSnap = LinearLayout.LayoutParams(dp(54), dp(38))
+                  lpSnap.leftMargin = dp(6)
+                  r.addView(snap, lpSnap)
+                  row = r
 
                   val params = WindowManager.LayoutParams(
                       WindowManager.LayoutParams.WRAP_CONTENT,
@@ -132,63 +327,66 @@ jobs:
                       WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                       WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
                       PixelFormat.TRANSLUCENT
-                  ).apply {
-                      gravity = Gravity.TOP or Gravity.START
-                      x = 100
-                      y = 300
-                  }
+                  )
+                  params.gravity = Gravity.TOP or Gravity.START
+                  params.x = 60
+                  params.y = 280
 
                   wm = getSystemService(WINDOW_SERVICE) as WindowManager
-                  wm?.addView(v, params)
+                  wm?.addView(r, params)
 
-                  val btn = v.findViewById<Button>(R.id.btnWidgetToggle)
-                  fun refresh() {
-                      if (Prefs.isActive(this)) {
-                          btn.text = "SIKAT: ON"
-                          btn.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#10B981"))
+                  tg.setOnClickListener {
+                      Cfg.set(this, "active", if (Cfg.b(this, "active")) "0" else "1")
+                      updateToggle()
+                  }
+
+                  snap.setOnClickListener {
+                      val s = GacorService.instance
+                      if (s == null) {
+                          Toast.makeText(this, "Aksesibilitas belum aktif", Toast.LENGTH_SHORT).show()
                       } else {
-                          btn.text = "SIKAT: OFF"
-                          btn.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#EF4444"))
+                          val ok = s.snapshotNow()
+                          Toast.makeText(
+                              this,
+                              if (ok) "Snapshot tersimpan, lihat di aplikasi" else "Buka layar Maxim dulu",
+                              Toast.LENGTH_SHORT
+                          ).show()
                       }
                   }
-                  refresh()
 
-                  var startX = 0; var startY = 0
-                  var touchX = 0f; var touchY = 0f
-                  var moved = false
-                  btn.setOnTouchListener { _, e ->
+                  var startX = 0
+                  var startY = 0
+                  var touchX = 0f
+                  var touchY = 0f
+                  handle.setOnTouchListener { _, e ->
                       when (e.action) {
                           MotionEvent.ACTION_DOWN -> {
-                              startX = params.x; startY = params.y
-                              touchX = e.rawX; touchY = e.rawY
-                              moved = false
+                              startX = params.x
+                              startY = params.y
+                              touchX = e.rawX
+                              touchY = e.rawY
                               true
                           }
                           MotionEvent.ACTION_MOVE -> {
-                              val dx = (e.rawX - touchX).toInt()
-                              val dy = (e.rawY - touchY).toInt()
-                              if (Math.abs(dx) > 10 || Math.abs(dy) > 10) moved = true
-                              params.x = startX + dx
-                              params.y = startY + dy
-                              wm?.updateViewLayout(v, params)
+                              params.x = startX + (e.rawX - touchX).toInt()
+                              params.y = startY + (e.rawY - touchY).toInt()
+                              wm?.updateViewLayout(r, params)
                               true
                           }
-                          MotionEvent.ACTION_UP -> {
-                              if (!moved) {
-                                  Prefs.setActive(this, !Prefs.isActive(this))
-                                  refresh()
-                              }
-                              true
-                          }
-                          else -> false
+                          else -> true
                       }
                   }
+
+                  handler.post(refresh)
               }
 
               override fun onDestroy() {
+                  handler.removeCallbacks(refresh)
+                  row?.let {
+                      try { wm?.removeView(it) } catch (_: Exception) { }
+                  }
+                  row = null
                   super.onDestroy()
-                  view?.let { try { wm?.removeView(it) } catch (_: Exception) {} }
-                  view = null
               }
           }
           GACOR_EOF
@@ -197,91 +395,250 @@ jobs:
           package id.karawang.gacorengine
 
           import android.accessibilityservice.AccessibilityService
+          import android.content.Intent
           import android.os.Handler
           import android.os.Looper
           import android.os.SystemClock
           import android.util.Log
           import android.view.accessibility.AccessibilityEvent
           import android.view.accessibility.AccessibilityNodeInfo
+          import java.util.Calendar
           import kotlin.random.Random
 
           class GacorService : AccessibilityService() {
 
               companion object {
                   private const val TAG = "GacorEngine"
-                  private const val TARGET_PKG = "com.taxsee.driver"
+                  const val TARGET_PKG = "com.taxsee.driver"
+
+                  @Volatile
+                  var instance: GacorService? = null
+
                   private val PRICE_REGEX = Regex("rp\\.?\\s*([0-9][0-9.,]*)")
+                  private val KM_REGEX = Regex("([0-9]+(?:[.,][0-9]+)?)\\s*km")
+                  private val METER_REGEX = Regex("(?<![a-z0-9])([0-9]{2,4})\\s*m(?![a-z0-9])")
               }
+
+              class Hit(val node: AccessibilityNodeInfo, val label: String)
+              class Info(val type: String, val price: Int, val pickKm: Double)
 
               private val handler = Handler(Looper.getMainLooper())
               private var lastScan = 0L
-              private var cooldownUntil = 0L
               private var pending = false
+              private var lastLabel = ""
+              private var lastClickAt = 0L
+              private var lastAcceptAt = 0L
+              private var confirmUntil = 0L
+              private var fails = 0
+              private var lastLogMsg = ""
+              private var lastLogAt = 0L
 
+              // ------------------------------------------------------------------
               override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-                  if (event == null || !Prefs.isActive(this)) return
+                  if (event == null) return
                   if (event.packageName?.toString() != TARGET_PKG) return
+                  if (!Cfg.b(this, "active")) return
+                  if (!inSchedule()) return
 
                   val now = SystemClock.uptimeMillis()
-                  if (pending || now < cooldownUntil || now - lastScan < 60) return
+                  val gap = Cfg.i(this, "scan_ms").coerceAtLeast(20)
+                  if (now - lastScan < gap) return
                   lastScan = now
+                  if (pending) return
 
                   val root = rootInActiveWindow ?: return
-                  val accept = Prefs.toList(Prefs.accept(this))
-                  val button = findAcceptButton(root, 0, accept) ?: return
+                  val dry = Cfg.b(this, "dry")
 
-                  val screenText = collectText(root, 0).lowercase()
-                  val reject = rejectReason(screenText)
-                  if (reject != null) {
-                      cooldownUntil = now + 1500
-                      Prefs.log(this, "TOLAK: $reject")
+                  // Langkah konfirmasi (hanya sesaat setelah klik ambil order)
+                  if (lastAcceptAt > 0 && now - lastAcceptAt < Cfg.i(this, "confirm_ms") && now > confirmUntil) {
+                      val c = findButton(root, 0, Cfg.list(this, "confirm_words"), true)
+                      if (c != null) {
+                          confirmUntil = now + 800
+                          if (dry) {
+                              logThrottled("SIMULASI: akan konfirmasi \"${c.label}\"")
+                          } else {
+                              val ok = try { c.node.performAction(AccessibilityNodeInfo.ACTION_CLICK) } catch (e: Exception) { false }
+                              Cfg.log(this, "KONFIRMASI \"${c.label}\" " + (if (ok) "OK" else "GAGAL"))
+                          }
+                          return
+                      }
+                  }
+
+                  val hit = findButton(root, 0, Cfg.list(this, "accept_words"), false) ?: return
+                  val same = hit.label == lastLabel
+                  if (same && now - lastClickAt < Cfg.i(this, "cooldown_ms")) return
+                  if (!same && now - lastClickAt < 400) return
+
+                  val text = collectText(root, 0).lowercase()
+                  val info = parse(text)
+                  val reason = rejectReason(text, info)
+                  if (reason != null) {
+                      if (logThrottled("TOLAK ${typeName(info.type)}: $reason")) Cfg.addReject(this)
                       return
                   }
 
-                  val dMin = Prefs.delayMin(this)
-                  val dMax = Prefs.delayMax(this)
-                  val delay = if (dMax <= 0) 0L else Random.nextLong(dMin.toLong(), dMax.toLong() + 1)
+                  if (dry) {
+                      logThrottled("SIMULASI: akan klik \"${hit.label}\" - ${describe(info)}")
+                      return
+                  }
+
+                  val lo = minOf(Cfg.i(this, "delay_min"), Cfg.i(this, "delay_max")).coerceAtLeast(0)
+                  val hi = maxOf(Cfg.i(this, "delay_min"), Cfg.i(this, "delay_max")).coerceAtLeast(0)
+                  val delay = if (hi <= 0) 0L else Random.nextLong(lo.toLong(), hi.toLong() + 1)
 
                   if (delay == 0L) {
-                      doClick(button)
+                      doClick(hit, info)
                   } else {
                       pending = true
                       handler.postDelayed({
                           pending = false
-                          if (Prefs.isActive(this)) doClick(button)
+                          if (Cfg.b(this, "active")) doClick(hit, info)
                       }, delay)
                   }
               }
 
-              private fun doClick(button: AccessibilityNodeInfo) {
+              // ------------------------------------------------------------------
+              private fun doClick(hit: Hit, info: Info) {
                   try {
-                      button.refresh()
-                      val ok = button.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                      cooldownUntil = SystemClock.uptimeMillis() + 3000
-                      Prefs.log(this, if (ok) "KLIK OK" else "KLIK GAGAL (tombol tidak merespons)")
-                      Log.d(TAG, "klik=$ok")
+                      hit.node.refresh()
+                      val ok = hit.node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                      val t = SystemClock.uptimeMillis()
+                      lastLabel = hit.label
+                      lastClickAt = t
+                      if (ok) {
+                          fails = 0
+                          lastAcceptAt = t
+                          Cfg.addClick(this, info.type, info.price)
+                          Cfg.log(this, "KLIK \"${hit.label}\" - ${describe(info)}")
+                          Notifier.alert(this, Notifier.ID_ALERT_CLICK, "Order diklik", describe(info))
+                      } else {
+                          fails++
+                          Cfg.log(this, "KLIK GAGAL \"${hit.label}\" ($fails)")
+                          if (fails >= Cfg.i(this, "fail_limit").coerceAtLeast(1)) {
+                              fails = 0
+                              Cfg.set(this, "active", "0")
+                              Cfg.log(this, "MESIN DIHENTIKAN: klik gagal beruntun")
+                              Notifier.alert(this, Notifier.ID_ALERT_ACC, "Mesin dihentikan",
+                                  "Klik gagal beruntun. Cek teks tombol di pengaturan, lalu nyalakan lagi.")
+                          }
+                      }
                   } catch (e: Exception) {
-                      Prefs.log(this, "ERROR klik: ${e.javaClass.simpleName}")
+                      Cfg.log(this, "ERROR klik: ${e.javaClass.simpleName}")
                   }
               }
 
-              private fun findAcceptButton(
-                  node: AccessibilityNodeInfo, depth: Int, words: List<String>
-              ): AccessibilityNodeInfo? {
+              // ------------------------------------------------------------------
+              private fun inSchedule(): Boolean {
+                  if (!Cfg.b(this, "sched_on")) return true
+                  val h = Calendar.getInstance().get(Calendar.HOUR_OF_DAY)
+                  val s = Cfg.i(this, "sched_start")
+                  val e = Cfg.i(this, "sched_end")
+                  if (s == e) return true
+                  return if (s < e) (h >= s && h < e) else (h >= s || h < e)
+              }
+
+              private fun typeName(t: String): String = when (t) {
+                  "bike" -> "BIKE"
+                  "del" -> "DELIVERY"
+                  else -> "LAIN"
+              }
+
+              private fun describe(i: Info): String {
+                  val p = if (i.price > 0) "Rp${"%,d".format(i.price)}" else "harga ?"
+                  val k = if (i.pickKm > 0) " jemput ${"%.1f".format(i.pickKm)}km" else ""
+                  return "${typeName(i.type)} $p$k"
+              }
+
+              private fun logThrottled(msg: String): Boolean {
+                  val n = SystemClock.uptimeMillis()
+                  if (msg == lastLogMsg && n - lastLogAt < 3000) return false
+                  lastLogMsg = msg
+                  lastLogAt = n
+                  Cfg.log(this, msg)
+                  return true
+              }
+
+              // ------------------------------------------------------------------
+              private fun detectType(text: String): String {
+                  if (Cfg.list(this, "kw_delivery").any { text.contains(it) }) return "del"
+                  if (Cfg.list(this, "kw_other").any { text.contains(it) }) return "other"
+                  return "bike"
+              }
+
+              private fun parse(text: String): Info {
+                  val type = detectType(text)
+                  var price = 0
+                  val pm = PRICE_REGEX.find(text)
+                  if (pm != null) {
+                      val raw = pm.groupValues[1].replace(Regex("[.,]00$"), "")
+                      price = raw.replace(Regex("[^0-9]"), "").toIntOrNull() ?: 0
+                  }
+                  var km = 0.0
+                  val km1 = KM_REGEX.find(text)
+                  if (km1 != null) {
+                      km = km1.groupValues[1].replace(',', '.').toDoubleOrNull() ?: 0.0
+                  } else {
+                      val m1 = METER_REGEX.find(text)
+                      if (m1 != null) km = (m1.groupValues[1].toDoubleOrNull() ?: 0.0) / 1000.0
+                  }
+                  return Info(type, price, km)
+              }
+
+              private fun rejectReason(text: String, info: Info): String? {
+                  val g = Cfg.list(this, "global_exc").firstOrNull { text.contains(it) }
+                  if (g != null) return "kata \"$g\""
+
+                  if (info.type == "other") {
+                      if (!Cfg.b(this, "other_on")) return "layanan lain dimatikan"
+                      val min = Cfg.i(this, "other_min")
+                      if (info.price in 1 until min) return "harga Rp${info.price} < Rp$min"
+                      return null
+                  }
+
+                  val p = if (info.type == "bike") "bike" else "del"
+                  if (!Cfg.b(this, "${p}_on")) return "layanan dimatikan"
+
+                  val ex = Cfg.list(this, "${p}_exc").firstOrNull { text.contains(it) }
+                  if (ex != null) return "kata \"$ex\""
+
+                  val inc = Cfg.list(this, "${p}_inc")
+                  if (inc.isNotEmpty() && inc.none { text.contains(it) }) return "tidak ada kata kunci ambil"
+
+                  val min = Cfg.i(this, "${p}_min")
+                  if (info.price in 1 until min) return "harga Rp${info.price} < Rp$min"
+
+                  val maxKm = Cfg.d(this, "${p}_pick_km")
+                  if (maxKm > 0 && info.pickKm > maxKm) {
+                      return "jemput ${"%.1f".format(info.pickKm)}km > ${maxKm}km"
+                  }
+                  return null
+              }
+
+              // ------------------------------------------------------------------
+              private fun matches(s: String, words: List<String>, exact: Boolean): Boolean {
+                  if (s.isEmpty()) return false
+                  return words.any { s == it || (!exact && s.startsWith(it)) }
+              }
+
+              private fun findButton(
+                  node: AccessibilityNodeInfo, depth: Int, words: List<String>, exact: Boolean
+              ): Hit? {
                   if (depth > 25) return null
-                  val label = "${node.text ?: ""} ${node.contentDescription ?: ""}".lowercase().trim()
-                  if (label.isNotEmpty() && words.any { label == it || label.startsWith(it) }) {
+                  val t = node.text?.toString()?.lowercase()?.trim() ?: ""
+                  val d = node.contentDescription?.toString()?.lowercase()?.trim() ?: ""
+                  val label = if (matches(t, words, exact)) t else if (matches(d, words, exact)) d else ""
+                  if (label.isNotEmpty()) {
                       var n: AccessibilityNodeInfo? = node
                       var up = 0
                       while (n != null && up < 4) {
-                          if (n.isClickable && n.isEnabled) return n
+                          if (n.isClickable && n.isEnabled) return Hit(n, label)
                           n = n.parent
                           up++
                       }
                   }
                   for (i in 0 until node.childCount) {
                       val child = node.getChild(i) ?: continue
-                      val found = findAcceptButton(child, depth + 1, words)
+                      val found = findButton(child, depth + 1, words, exact)
                       if (found != null) return found
                   }
                   return null
@@ -299,85 +656,278 @@ jobs:
                   return sb.toString()
               }
 
-              private fun rejectReason(text: String): String? {
-                  Prefs.toList(Prefs.exclude(this)).firstOrNull { text.contains(it) }
-                      ?.let { return "kata \"$it\"" }
-
-                  val include = Prefs.toList(Prefs.include(this))
-                  if (include.isNotEmpty() && include.none { text.contains(it) })
-                      return "tidak ada kata kunci ambil"
-
-                  val price = extractPrice(text)
-                  val min = Prefs.minPrice(this)
-                  if (price in 1 until min) return "harga Rp$price < Rp$min"
-                  return null
+              // ------------------------------------------------------------------
+              // Snapshot layar Maxim (dipanggil dari tombol SNAP di widget)
+              fun snapshotNow(): Boolean {
+                  val root = rootInActiveWindow
+                  if (root == null || root.packageName?.toString() != TARGET_PKG) {
+                      Cfg.log(this, "SNAPSHOT gagal: layar aktif bukan Maxim Driver")
+                      return false
+                  }
+                  val lines = ArrayList<String>()
+                  dump(root, 0, lines)
+                  val info = parse(collectText(root, 0).lowercase())
+                  val head = "Terbaca: ${describe(info)}\n----"
+                  Cfg.set(this, "snapshot", head + "\n" + lines.take(90).joinToString("\n"))
+                  Cfg.log(this, "SNAPSHOT tersimpan (${lines.size} baris)")
+                  return true
               }
 
-              private fun extractPrice(text: String): Int {
-                  val m = PRICE_REGEX.find(text) ?: return 0
-                  val raw = m.groupValues[1].replace(Regex("[.,]00$"), "")
-                  return raw.replace(Regex("[^0-9]"), "").toIntOrNull() ?: 0
+              private fun dump(node: AccessibilityNodeInfo, depth: Int, out: MutableList<String>) {
+                  if (depth > 25 || out.size > 120) return
+                  val t = node.text?.toString()?.trim() ?: ""
+                  val d = node.contentDescription?.toString()?.trim() ?: ""
+                  val label = if (t.isNotEmpty()) t else d
+                  if (label.isNotEmpty()) {
+                      out.add("• " + label.replace("\n", " ") + (if (node.isClickable) "   [TOMBOL]" else ""))
+                  }
+                  for (i in 0 until node.childCount) {
+                      val child = node.getChild(i) ?: continue
+                      dump(child, depth + 1, out)
+                  }
               }
 
-              override fun onInterrupt() { Log.d(TAG, "Layanan terputus") }
-              override fun onServiceConnected() { Prefs.log(this, "Layanan terhubung") }
+              // ------------------------------------------------------------------
+              override fun onServiceConnected() {
+                  instance = this
+                  Cfg.log(this, "Layanan terhubung")
+              }
+
+              override fun onUnbind(intent: Intent?): Boolean {
+                  instance = null
+                  if (Cfg.b(this, "active")) {
+                      Notifier.alert(this, Notifier.ID_ALERT_ACC, "Aksesibilitas terputus",
+                          "Nyalakan lagi di Pengaturan → Aksesibilitas.")
+                  }
+                  return super.onUnbind(intent)
+              }
+
+              override fun onInterrupt() {
+                  Log.d(TAG, "Layanan terputus")
+              }
+          }
+          GACOR_EOF
+          mkdir -p "app/src/main/java/id/karawang/gacorengine"
+          cat > "app/src/main/java/id/karawang/gacorengine/GuardService.kt" <<'GACOR_EOF'
+          package id.karawang.gacorengine
+
+          import android.app.NotificationManager
+          import android.app.Service
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.os.Build
+          import android.os.Handler
+          import android.os.IBinder
+          import android.os.Looper
+
+          class GuardService : Service() {
+
+              private val handler = Handler(Looper.getMainLooper())
+              private var alerted = false
+
+              private val tick = object : Runnable {
+                  override fun run() {
+                      val ctx = this@GuardService
+                      val active = Cfg.b(ctx, "active")
+                      val acc = Util.isAccessibilityOn(ctx)
+                      val dry = if (Cfg.b(ctx, "dry")) " (simulasi)" else ""
+                      val text = when {
+                          !acc -> "PERINGATAN: aksesibilitas mati"
+                          active -> "Mesin BERJALAN$dry • ${Cfg.todayClicks(ctx)} klik hari ini"
+                          else -> "Mesin berhenti (siaga)"
+                      }
+                      getSystemService(NotificationManager::class.java)
+                          .notify(Notifier.ID_STATUS, Notifier.status(ctx, text))
+
+                      if (!acc && active) {
+                          if (!alerted) {
+                              alerted = true
+                              Notifier.alert(ctx, Notifier.ID_ALERT_ACC, "Aksesibilitas mati",
+                                  "Nyalakan lagi di Pengaturan → Aksesibilitas agar mesin bekerja.")
+                          }
+                      } else {
+                          alerted = false
+                          Notifier.cancel(ctx, Notifier.ID_ALERT_ACC)
+                      }
+                      handler.postDelayed(this, 5000)
+                  }
+              }
+
+              override fun onBind(intent: Intent?): IBinder? = null
+
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  val n = Notifier.status(this, "Mesin siaga")
+                  if (Build.VERSION.SDK_INT >= 34) {
+                      startForeground(Notifier.ID_STATUS, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+                  } else {
+                      startForeground(Notifier.ID_STATUS, n)
+                  }
+                  handler.removeCallbacks(tick)
+                  handler.post(tick)
+                  return START_STICKY
+              }
+
+              override fun onDestroy() {
+                  handler.removeCallbacks(tick)
+                  super.onDestroy()
+              }
           }
           GACOR_EOF
           mkdir -p "app/src/main/java/id/karawang/gacorengine"
           cat > "app/src/main/java/id/karawang/gacorengine/MainActivity.kt" <<'GACOR_EOF'
           package id.karawang.gacorengine
 
-          import android.content.ComponentName
+          import android.Manifest
+          import android.content.ClipData
+          import android.content.ClipboardManager
+          import android.content.Context
           import android.content.Intent
-          import android.content.res.ColorStateList
+          import android.content.pm.PackageManager
           import android.graphics.Color
+          import android.graphics.Typeface
+          import android.graphics.drawable.GradientDrawable
           import android.net.Uri
+          import android.os.Build
           import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
           import android.provider.Settings
+          import android.text.InputType
+          import android.view.ViewGroup
           import android.widget.Button
           import android.widget.EditText
+          import android.widget.LinearLayout
+          import android.widget.ScrollView
           import android.widget.TextView
           import android.widget.Toast
           import androidx.appcompat.app.AppCompatActivity
+          import androidx.appcompat.widget.SwitchCompat
+          import androidx.core.content.ContextCompat
 
           class MainActivity : AppCompatActivity() {
 
+              private lateinit var root: LinearLayout
+              private val fields = ArrayList<Pair<String, EditText>>()
+              private val switches = ArrayList<Pair<String, SwitchCompat>>()
               private lateinit var tvStatus: TextView
-              private lateinit var btnToggle: Button
-              private lateinit var etPrice: EditText
-              private lateinit var etInclude: EditText
-              private lateinit var etExclude: EditText
-              private lateinit var etAccept: EditText
-              private lateinit var etDelayMin: EditText
-              private lateinit var etDelayMax: EditText
+              private lateinit var tvStats: TextView
+              private lateinit var tvSnap: TextView
               private lateinit var tvLog: TextView
+              private lateinit var btnToggle: Button
+              private val ui = Handler(Looper.getMainLooper())
 
+              private val tick = object : Runnable {
+                  override fun run() {
+                      refreshUi()
+                      ui.postDelayed(this, 1500)
+                  }
+              }
+
+              // ------------------------------------------------------------ helpers
+              private fun dp(v: Int): Int = (v * resources.displayMetrics.density).toInt()
+
+              private fun bg(color: Int, radius: Int): GradientDrawable {
+                  val g = GradientDrawable()
+                  g.setColor(color)
+                  g.cornerRadius = dp(radius).toFloat()
+                  return g
+              }
+
+              private fun lp(top: Int, bottom: Int): LinearLayout.LayoutParams {
+                  val p = LinearLayout.LayoutParams(
+                      ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
+                  )
+                  p.topMargin = dp(top)
+                  p.bottomMargin = dp(bottom)
+                  return p
+              }
+
+              private fun label(
+                  parent: LinearLayout, s: String, size: Float, color: Int, bold: Boolean, top: Int
+              ): TextView {
+                  val t = TextView(this)
+                  t.text = s
+                  t.textSize = size
+                  t.setTextColor(color)
+                  if (bold) t.setTypeface(null, Typeface.BOLD)
+                  parent.addView(t, lp(top, 0))
+                  return t
+              }
+
+              private fun card(title: String): LinearLayout {
+                  val l = LinearLayout(this)
+                  l.orientation = LinearLayout.VERTICAL
+                  l.background = bg(0xFF1E293B.toInt(), 12)
+                  l.setPadding(dp(16), dp(14), dp(16), dp(16))
+                  root.addView(l, lp(0, 12))
+                  label(l, title, 15f, Color.WHITE, true, 0)
+                  return l
+              }
+
+              private fun button(parent: LinearLayout, text: String, color: Int, h: Int, onClick: () -> Unit): Button {
+                  val b = Button(this)
+                  b.text = text
+                  b.setTextColor(Color.WHITE)
+                  b.setTypeface(null, Typeface.BOLD)
+                  b.background = bg(color, 10)
+                  b.setOnClickListener { onClick() }
+                  val p = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(h))
+                  p.topMargin = dp(8)
+                  parent.addView(b, p)
+                  return b
+              }
+
+              // kind: 0 teks, 1 angka bulat, 2 angka desimal
+              private fun field(parent: LinearLayout, title: String, key: String, kind: Int) {
+                  label(parent, title, 12f, 0xFF94A3B8.toInt(), false, 10)
+                  val e = EditText(this)
+                  e.inputType = when (kind) {
+                      1 -> InputType.TYPE_CLASS_NUMBER
+                      2 -> InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+                      else -> InputType.TYPE_CLASS_TEXT
+                  }
+                  e.setSingleLine(true)
+                  e.setText(Cfg.s(this, key))
+                  e.setTextColor(Color.WHITE)
+                  e.textSize = 14f
+                  parent.addView(e, lp(0, 0))
+                  fields.add(Pair(key, e))
+              }
+
+              private fun sw(parent: LinearLayout, title: String, key: String) {
+                  val s = SwitchCompat(this)
+                  s.text = title
+                  s.setTextColor(Color.WHITE)
+                  s.isChecked = Cfg.b(this, key)
+                  s.setOnCheckedChangeListener { _, on -> Cfg.set(this, key, if (on) "1" else "0") }
+                  parent.addView(s, lp(10, 0))
+                  switches.add(Pair(key, s))
+              }
+
+              // ------------------------------------------------------------ onCreate
               override fun onCreate(savedInstanceState: Bundle?) {
                   super.onCreate(savedInstanceState)
-                  setContentView(R.layout.activity_main)
 
-                  tvStatus = findViewById(R.id.tvStatus)
-                  btnToggle = findViewById(R.id.btnToggle)
-                  etPrice = findViewById(R.id.etPrice)
-                  etInclude = findViewById(R.id.etInclude)
-                  etExclude = findViewById(R.id.etExclude)
-                  etAccept = findViewById(R.id.etAccept)
-                  etDelayMin = findViewById(R.id.etDelayMin)
-                  etDelayMax = findViewById(R.id.etDelayMax)
-                  tvLog = findViewById(R.id.tvLog)
+                  val scroll = ScrollView(this)
+                  scroll.setBackgroundColor(0xFF0F172A.toInt())
+                  root = LinearLayout(this)
+                  root.orientation = LinearLayout.VERTICAL
+                  root.setPadding(dp(14), dp(14), dp(14), dp(28))
+                  scroll.addView(root)
+                  setContentView(scroll)
 
-                  etPrice.setText(Prefs.minPrice(this).toString())
-                  etInclude.setText(Prefs.include(this))
-                  etExclude.setText(Prefs.exclude(this))
-                  etAccept.setText(Prefs.accept(this))
-                  etDelayMin.setText(Prefs.delayMin(this).toString())
-                  etDelayMax.setText(Prefs.delayMax(this).toString())
+                  val title = label(root, "KARAWANG GACOR ENGINE", 22f, 0xFF00E676.toInt(), true, 8)
+                  title.gravity = android.view.Gravity.CENTER
+                  val sub = label(root, "Bike & Delivery • v3.0 • offline, tanpa server", 12f, 0xFF94A3B8.toInt(), false, 0)
+                  sub.gravity = android.view.Gravity.CENTER
+                  root.addView(TextView(this), lp(0, 8))
 
-                  findViewById<Button>(R.id.btnAccessibility).setOnClickListener {
+                  // ---- kontrol
+                  val kontrol = card("KONTROL")
+                  button(kontrol, "1. AKTIFKAN AKSESIBILITAS", 0xFFF59E0B.toInt(), 50) {
                       startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                   }
-
-                  findViewById<Button>(R.id.btnOverlay).setOnClickListener {
+                  button(kontrol, "2. IZIN TOMBOL MELAYANG", 0xFF3B82F6.toInt(), 50) {
                       if (!Settings.canDrawOverlays(this)) {
                           startActivity(
                               Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
@@ -386,122 +936,263 @@ jobs:
                           Toast.makeText(this, "Izin overlay sudah aktif", Toast.LENGTH_SHORT).show()
                       }
                   }
+                  button(kontrol, "3. BEBASKAN DARI HEMAT BATERAI", 0xFF8B5CF6.toInt(), 50) {
+                      startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+                  }
+                  btnToggle = button(kontrol, "4. START MESIN", 0xFF10B981.toInt(), 60) { toggleEngine() }
+                  sw(kontrol, "Mode simulasi (catat saja, tidak klik)", "dry")
 
-                  findViewById<Button>(R.id.btnSave).setOnClickListener {
-                      Prefs.saveFilters(
-                          this,
-                          etPrice.text.toString().toIntOrNull() ?: 10000,
-                          etInclude.text.toString(),
-                          etExclude.text.toString(),
-                          etAccept.text.toString(),
-                          etDelayMin.text.toString().toIntOrNull() ?: 0,
-                          etDelayMax.text.toString().toIntOrNull() ?: 80
-                      )
-                      Toast.makeText(this, "Filter disimpan", Toast.LENGTH_SHORT).show()
+                  // ---- status
+                  val st = card("STATUS")
+                  tvStatus = label(st, "", 13f, 0xFFCBD5E1.toInt(), false, 8)
+
+                  // ---- statistik
+                  val sc = card("STATISTIK HARI INI")
+                  tvStats = label(sc, "", 13f, 0xFFCBD5E1.toInt(), false, 8)
+                  button(sc, "RESET STATISTIK", 0xFF475569.toInt(), 40) {
+                      Cfg.resetStats(this)
                       refreshUi()
                   }
 
-                  btnToggle.setOnClickListener {
-                      if (!isServiceEnabled()) {
-                          Toast.makeText(this, "Aktifkan aksesibilitas dulu", Toast.LENGTH_LONG).show()
-                          return@setOnClickListener
-                      }
-                      val now = !Prefs.isActive(this)
-                      Prefs.setActive(this, now)
-                      if (now && Settings.canDrawOverlays(this)) {
-                          startService(Intent(this, FloatingWidgetService::class.java))
-                      } else if (!now) {
-                          stopService(Intent(this, FloatingWidgetService::class.java))
-                      }
+                  // ---- bike
+                  val bike = card("BIKE (UTAMA)")
+                  sw(bike, "Ambil order Bike", "bike_on")
+                  field(bike, "Harga minimal (Rp)", "bike_min", 1)
+                  field(bike, "Jarak jemput maksimal (km, 0 = bebas)", "bike_pick_km", 2)
+                  field(bike, "Kata wajib ada (pisah koma, kosong = semua)", "bike_inc", 0)
+                  field(bike, "Kata tolak (pisah koma)", "bike_exc", 0)
+
+                  // ---- delivery
+                  val del = card("DELIVERY (SAMPINGAN)")
+                  sw(del, "Ambil order Delivery", "del_on")
+                  field(del, "Harga minimal (Rp)", "del_min", 1)
+                  field(del, "Jarak jemput maksimal (km, 0 = bebas)", "del_pick_km", 2)
+                  field(del, "Kata wajib ada, mis. indomaret, apotek, alfamart, pasar", "del_inc", 0)
+                  field(del, "Kata tolak (pisah koma)", "del_exc", 0)
+
+                  // ---- lain
+                  val other = card("LAYANAN LAIN (Car, dll)")
+                  sw(other, "Ambil layanan lain", "other_on")
+                  field(other, "Harga minimal (Rp)", "other_min", 1)
+
+                  // ---- umum
+                  val umum = card("FILTER UMUM")
+                  field(umum, "Kata tolak untuk semua layanan", "global_exc", 0)
+
+                  // ---- kecepatan
+                  val cepat = card("KECEPATAN & TOMBOL")
+                  field(cepat, "Jeda klik minimal (ms, 0 = langsung)", "delay_min", 1)
+                  field(cepat, "Jeda klik maksimal (ms)", "delay_max", 1)
+                  field(cepat, "Interval baca layar (ms)", "scan_ms", 1)
+                  field(cepat, "Cooldown tombol sama (ms)", "cooldown_ms", 1)
+                  field(cepat, "Teks tombol ambil order (pisah koma)", "accept_words", 0)
+                  field(cepat, "Teks tombol konfirmasi (pisah koma)", "confirm_words", 0)
+                  field(cepat, "Jendela konfirmasi setelah klik (ms)", "confirm_ms", 1)
+                  field(cepat, "Berhenti otomatis setelah klik gagal beruntun", "fail_limit", 1)
+
+                  // ---- jadwal
+                  val jad = card("JADWAL OTOMATIS")
+                  sw(jad, "Aktif hanya pada jam tertentu", "sched_on")
+                  field(jad, "Mulai (jam 0-23)", "sched_start", 1)
+                  field(jad, "Selesai (jam 0-23)", "sched_end", 1)
+
+                  // ---- pengenal
+                  val kw = card("PENGENAL JENIS LAYANAN")
+                  label(kw, "Delivery dikenali dari kata di bawah. Jika tidak ada yang cocok, dianggap Bike.",
+                      11f, 0xFF94A3B8.toInt(), false, 6)
+                  field(kw, "Kata penanda Delivery", "kw_delivery", 0)
+                  field(kw, "Kata penanda layanan lain", "kw_other", 0)
+
+                  // ---- simpan
+                  val simpan = card("SIMPAN")
+                  button(simpan, "SIMPAN SEMUA PENGATURAN", 0xFF6366F1.toInt(), 54) {
+                      for (f in fields) Cfg.set(this, f.first, f.second.text.toString())
+                      Toast.makeText(this, "Pengaturan disimpan", Toast.LENGTH_SHORT).show()
                       refreshUi()
+                  }
+                  button(simpan, "KEMBALIKAN KE DEFAULT", 0xFF475569.toInt(), 44) {
+                      Cfg.resetDefaults(this)
+                      for (f in fields) f.second.setText(Cfg.s(this, f.first))
+                      for (s in switches) s.second.isChecked = Cfg.b(this, s.first)
+                      Toast.makeText(this, "Dikembalikan ke default", Toast.LENGTH_SHORT).show()
+                  }
+
+                  // ---- snapshot
+                  val snap = card("SNAPSHOT LAYAR MAXIM")
+                  label(snap,
+                      "Buka layar order di Maxim, tekan tombol SNAP di widget melayang. Hasilnya muncul di sini " +
+                          "(teks yang terbaca + tombol). Dipakai untuk mencocokkan teks tombol di pengaturan.",
+                      11f, 0xFF94A3B8.toInt(), false, 6)
+                  tvSnap = label(snap, "", 11f, 0xFFCBD5E1.toInt(), false, 8)
+                  tvSnap.typeface = Typeface.MONOSPACE
+                  button(snap, "SALIN SNAPSHOT", 0xFF475569.toInt(), 40) {
+                      val cm = getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                      cm.setPrimaryClip(ClipData.newPlainText("snapshot", Cfg.s(this, "snapshot")))
+                      Toast.makeText(this, "Disalin", Toast.LENGTH_SHORT).show()
+                  }
+
+                  // ---- log
+                  val lg = card("LOG TERAKHIR")
+                  tvLog = label(lg, "", 11f, 0xFFCBD5E1.toInt(), false, 8)
+
+                  if (Build.VERSION.SDK_INT >= 33 &&
+                      ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                      != PackageManager.PERMISSION_GRANTED
+                  ) {
+                      requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 11)
                   }
               }
 
               override fun onResume() {
                   super.onResume()
-                  refreshUi()
+                  ui.removeCallbacks(tick)
+                  ui.post(tick)
               }
 
-              override fun onStart() {
-                  super.onStart()
-                  refreshUi()
+              override fun onPause() {
+                  ui.removeCallbacks(tick)
+                  super.onPause()
               }
 
-              private fun isServiceEnabled(): Boolean {
-                  val enabled = Settings.Secure.getString(
-                      contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-                  ) ?: return false
-                  val me = ComponentName(this, GacorService::class.java).flattenToString()
-                  return enabled.split(':').any { it.equals(me, ignoreCase = true) }
+              // ------------------------------------------------------------ engine
+              private fun toggleEngine() {
+                  // simpan dulu isi kolom agar pengaturan terbaru terpakai
+                  for (f in fields) Cfg.set(this, f.first, f.second.text.toString())
+
+                  if (!Util.isAccessibilityOn(this)) {
+                      Toast.makeText(this, "Aktifkan aksesibilitas dulu", Toast.LENGTH_LONG).show()
+                      return
+                  }
+                  val now = !Cfg.b(this, "active")
+                  Cfg.set(this, "active", if (now) "1" else "0")
+                  if (now) {
+                      try {
+                          ContextCompat.startForegroundService(this, Intent(this, GuardService::class.java))
+                      } catch (e: Exception) {
+                          Toast.makeText(this, "Notifikasi gagal: ${e.javaClass.simpleName}", Toast.LENGTH_LONG).show()
+                      }
+                      if (Settings.canDrawOverlays(this)) {
+                          startService(Intent(this, FloatingWidgetService::class.java))
+                      }
+                  } else {
+                      stopService(Intent(this, FloatingWidgetService::class.java))
+                      stopService(Intent(this, GuardService::class.java))
+                  }
+                  refreshUi()
               }
 
               private fun refreshUi() {
-                  val active = Prefs.isActive(this)
-                  val acc = isServiceEnabled()
-                  val overlay = Settings.canDrawOverlays(this)
-
+                  val active = Cfg.b(this, "active")
                   if (active) {
                       btnToggle.text = "STOP MESIN"
-                      btnToggle.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#EF4444"))
+                      btnToggle.background = bg(0xFFEF4444.toInt(), 10)
                   } else {
-                      btnToggle.text = "3. START MESIN"
-                      btnToggle.backgroundTintList = ColorStateList.valueOf(Color.parseColor("#10B981"))
+                      btnToggle.text = "4. START MESIN"
+                      btnToggle.background = bg(0xFF10B981.toInt(), 10)
                   }
-
+                  val acc = Util.isAccessibilityOn(this)
+                  val ov = Settings.canDrawOverlays(this)
+                  val jadwal = if (Cfg.b(this, "sched_on"))
+                      "${Cfg.i(this, "sched_start")}:00 - ${Cfg.i(this, "sched_end")}:00" else "nonaktif"
                   tvStatus.text = "• Aksesibilitas: ${if (acc) "AKTIF" else "BELUM AKTIF"}\n" +
-                      "• Overlay: ${if (overlay) "AKTIF" else "BELUM AKTIF"}\n" +
-                      "• Mesin: ${if (active) "BERJALAN" else "BERHENTI"}\n" +
-                      "• Harga min: Rp ${Prefs.minPrice(this)}\n" +
-                      "• Jeda klik: ${Prefs.delayMin(this)}-${Prefs.delayMax(this)} ms\n" +
-                      "• Target: Maxim Driver (com.taxsee.driver)"
-                  tvLog.text = Prefs.getLog(this)
+                      "• Tombol melayang: ${if (ov) "IZIN OK" else "BELUM DIIZINKAN"}\n" +
+                      "• Mesin: ${if (active) "BERJALAN" else "BERHENTI"}" +
+                      "${if (Cfg.b(this, "dry")) " (simulasi)" else ""}\n" +
+                      "• Jeda klik: ${Cfg.i(this, "delay_min")}-${Cfg.i(this, "delay_max")} ms\n" +
+                      "• Jadwal: $jadwal\n" +
+                      "• Target: Maxim Driver (${GacorService.TARGET_PKG})"
+                  tvStats.text = Cfg.statsText(this)
+                  val sn = Cfg.s(this, "snapshot")
+                  tvSnap.text = if (sn.isBlank()) "(belum ada snapshot)" else sn
+                  tvLog.text = Cfg.getLog(this)
               }
           }
           GACOR_EOF
           mkdir -p "app/src/main/java/id/karawang/gacorengine"
-          cat > "app/src/main/java/id/karawang/gacorengine/Prefs.kt" <<'GACOR_EOF'
+          cat > "app/src/main/java/id/karawang/gacorengine/Notifier.kt" <<'GACOR_EOF'
           package id.karawang.gacorengine
 
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.PendingIntent
           import android.content.Context
+          import android.content.Intent
+          import android.os.Build
+          import androidx.core.app.NotificationCompat
+          import androidx.core.app.NotificationManagerCompat
 
-          object Prefs {
-              private fun sp(c: Context) = c.getSharedPreferences("gacor", Context.MODE_PRIVATE)
+          object Notifier {
+              const val CH_STATUS = "gacor_status"
+              const val CH_ALERT = "gacor_alert"
+              const val ID_STATUS = 1
+              const val ID_ALERT_ACC = 2
+              const val ID_ALERT_CLICK = 3
 
-              fun isActive(c: Context) = sp(c).getBoolean("active", false)
-              fun setActive(c: Context, v: Boolean) = sp(c).edit().putBoolean("active", v).apply()
-
-              fun minPrice(c: Context) = sp(c).getInt("min_price", 10000)
-              fun include(c: Context) = sp(c).getString("include", "indomaret, apotek, alfamart, pasar") ?: ""
-              fun exclude(c: Context) = sp(c).getString("exclude", "bandara, perbaikan rating") ?: ""
-              fun accept(c: Context) = sp(c).getString("accept", "minta order, ambil order, terima, lanjut") ?: ""
-              fun delayMin(c: Context) = sp(c).getInt("delay_min", 0)
-              fun delayMax(c: Context) = sp(c).getInt("delay_max", 80)
-
-              fun saveFilters(
-                  c: Context, price: Int, include: String, exclude: String,
-                  accept: String, dMin: Int, dMax: Int
-              ) {
-                  sp(c).edit()
-                      .putInt("min_price", price)
-                      .putString("include", include)
-                      .putString("exclude", exclude)
-                      .putString("accept", accept)
-                      .putInt("delay_min", dMin.coerceAtLeast(0))
-                      .putInt("delay_max", dMax.coerceAtLeast(dMin.coerceAtLeast(0)))
-                      .apply()
+              fun ensureChannels(c: Context) {
+                  if (Build.VERSION.SDK_INT >= 26) {
+                      val nm = c.getSystemService(NotificationManager::class.java)
+                      nm.createNotificationChannel(
+                          NotificationChannel(CH_STATUS, "Status mesin", NotificationManager.IMPORTANCE_LOW)
+                      )
+                      nm.createNotificationChannel(
+                          NotificationChannel(CH_ALERT, "Peringatan", NotificationManager.IMPORTANCE_HIGH)
+                      )
+                  }
               }
 
-              fun log(c: Context, line: String) {
-                  val t = java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())
-                  val old = sp(c).getString("log", "") ?: ""
-                  val lines = (listOf("$t $line") + old.split("\n").filter { it.isNotBlank() }).take(8)
-                  sp(c).edit().putString("log", lines.joinToString("\n")).apply()
+              fun status(c: Context, text: String): Notification {
+                  ensureChannels(c)
+                  val open = PendingIntent.getActivity(
+                      c, 0, Intent(c, MainActivity::class.java),
+                      PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                  )
+                  return NotificationCompat.Builder(c, CH_STATUS)
+                      .setSmallIcon(R.drawable.ic_notif)
+                      .setContentTitle("Karawang Gacor Engine")
+                      .setContentText(text)
+                      .setOngoing(true)
+                      .setContentIntent(open)
+                      .build()
               }
 
-              fun getLog(c: Context) = sp(c).getString("log", "(belum ada)") ?: ""
+              fun alert(c: Context, id: Int, title: String, text: String) {
+                  ensureChannels(c)
+                  val n = NotificationCompat.Builder(c, CH_ALERT)
+                      .setSmallIcon(R.drawable.ic_notif)
+                      .setContentTitle(title)
+                      .setContentText(text)
+                      .setPriority(NotificationCompat.PRIORITY_HIGH)
+                      .setDefaults(NotificationCompat.DEFAULT_ALL)
+                      .setAutoCancel(true)
+                      .build()
+                  try {
+                      NotificationManagerCompat.from(c).notify(id, n)
+                  } catch (_: SecurityException) {
+                  }
+              }
 
-              fun toList(s: String): List<String> =
-                  s.split(",").map { it.trim().lowercase() }.filter { it.isNotEmpty() }
+              fun cancel(c: Context, id: Int) {
+                  NotificationManagerCompat.from(c).cancel(id)
+              }
+          }
+          GACOR_EOF
+          mkdir -p "app/src/main/java/id/karawang/gacorengine"
+          cat > "app/src/main/java/id/karawang/gacorengine/Util.kt" <<'GACOR_EOF'
+          package id.karawang.gacorengine
+
+          import android.content.ComponentName
+          import android.content.Context
+          import android.provider.Settings
+
+          object Util {
+              fun isAccessibilityOn(c: Context): Boolean {
+                  val enabled = Settings.Secure.getString(
+                      c.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
+                  ) ?: return false
+                  val me = ComponentName(c, GacorService::class.java).flattenToString()
+                  return enabled.split(':').any { it.equals(me, ignoreCase = true) }
+              }
           }
           GACOR_EOF
           mkdir -p "app/src/main/res/drawable"
@@ -513,242 +1204,19 @@ jobs:
               <path android:fillColor="#00E676" android:pathData="M54,10L26,54h18l-6,32 32,-46H50z"/>
           </vector>
           GACOR_EOF
-          mkdir -p "app/src/main/res/layout"
-          cat > "app/src/main/res/layout/activity_main.xml" <<'GACOR_EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
-              android:layout_width="match_parent"
-              android:layout_height="match_parent"
-              android:background="#0F172A"
-              android:fillViewport="true">
-
-              <LinearLayout
-                  android:layout_width="match_parent"
-                  android:layout_height="wrap_content"
-                  android:orientation="vertical"
-                  android:padding="16dp">
-
-                  <TextView
-                      android:layout_width="match_parent"
-                      android:layout_height="wrap_content"
-                      android:layout_marginTop="12dp"
-                      android:gravity="center"
-                      android:text="KARAWANG GACOR ENGINE"
-                      android:textColor="#00E676"
-                      android:textSize="22sp"
-                      android:textStyle="bold" />
-
-                  <TextView
-                      android:layout_width="match_parent"
-                      android:layout_height="wrap_content"
-                      android:layout_marginBottom="20dp"
-                      android:gravity="center"
-                      android:text="Private Driver Edition v2.1"
-                      android:textColor="#94A3B8"
-                      android:textSize="12sp" />
-
-                  <Button
-                      android:id="@+id/btnAccessibility"
-                      android:layout_width="match_parent"
-                      android:layout_height="52dp"
-                      android:layout_marginBottom="10dp"
-                      android:backgroundTint="#F59E0B"
-                      android:text="1. AKTIFKAN AKSESIBILITAS"
-                      android:textStyle="bold" />
-
-                  <Button
-                      android:id="@+id/btnOverlay"
-                      android:layout_width="match_parent"
-                      android:layout_height="52dp"
-                      android:layout_marginBottom="10dp"
-                      android:backgroundTint="#3B82F6"
-                      android:text="2. IZIN TOMBOL MELAYANG"
-                      android:textStyle="bold" />
-
-                  <Button
-                      android:id="@+id/btnToggle"
-                      android:layout_width="match_parent"
-                      android:layout_height="58dp"
-                      android:layout_marginBottom="20dp"
-                      android:backgroundTint="#10B981"
-                      android:text="3. START MESIN"
-                      android:textStyle="bold" />
-
-                  <LinearLayout
-                      android:layout_width="match_parent"
-                      android:layout_height="wrap_content"
-                      android:layout_marginBottom="16dp"
-                      android:background="#1E293B"
-                      android:orientation="vertical"
-                      android:padding="16dp">
-
-                      <TextView
-                          android:layout_width="wrap_content"
-                          android:layout_height="wrap_content"
-                          android:text="FILTER"
-                          android:textColor="#FFFFFF"
-                          android:textStyle="bold" />
-
-                      <TextView
-                          android:layout_width="wrap_content"
-                          android:layout_height="wrap_content"
-                          android:layout_marginTop="8dp"
-                          android:text="Harga minimal (Rp)"
-                          android:textColor="#94A3B8"
-                          android:textSize="12sp" />
-
-                      <EditText
-                          android:id="@+id/etPrice"
-                          android:layout_width="match_parent"
-                          android:layout_height="wrap_content"
-                          android:inputType="number"
-                          android:textColor="#FFFFFF" />
-
-                      <TextView
-                          android:layout_width="wrap_content"
-                          android:layout_height="wrap_content"
-                          android:layout_marginTop="8dp"
-                          android:text="Kata kunci ambil (pisah koma, kosong = semua)"
-                          android:textColor="#94A3B8"
-                          android:textSize="12sp" />
-
-                      <EditText
-                          android:id="@+id/etInclude"
-                          android:layout_width="match_parent"
-                          android:layout_height="wrap_content"
-                          android:inputType="text"
-                          android:textColor="#FFFFFF" />
-
-                      <TextView
-                          android:layout_width="wrap_content"
-                          android:layout_height="wrap_content"
-                          android:layout_marginTop="8dp"
-                          android:text="Kata kunci tolak (pisah koma)"
-                          android:textColor="#94A3B8"
-                          android:textSize="12sp" />
-
-                      <EditText
-                          android:id="@+id/etExclude"
-                          android:layout_width="match_parent"
-                          android:layout_height="wrap_content"
-                          android:inputType="text"
-                          android:textColor="#FFFFFF" />
-
-
-                      <TextView
-                          android:layout_width="wrap_content"
-                          android:layout_height="wrap_content"
-                          android:layout_marginTop="8dp"
-                          android:text="Teks tombol ambil order (pisah koma)"
-                          android:textColor="#94A3B8"
-                          android:textSize="12sp" />
-
-                      <EditText
-                          android:id="@+id/etAccept"
-                          android:layout_width="match_parent"
-                          android:layout_height="wrap_content"
-                          android:inputType="text"
-                          android:textColor="#FFFFFF" />
-
-                      <TextView
-                          android:layout_width="wrap_content"
-                          android:layout_height="wrap_content"
-                          android:layout_marginTop="8dp"
-                          android:text="Jeda klik minimal (ms, 0 = langsung)"
-                          android:textColor="#94A3B8"
-                          android:textSize="12sp" />
-
-                      <EditText
-                          android:id="@+id/etDelayMin"
-                          android:layout_width="match_parent"
-                          android:layout_height="wrap_content"
-                          android:inputType="number"
-                          android:textColor="#FFFFFF" />
-
-                      <TextView
-                          android:layout_width="wrap_content"
-                          android:layout_height="wrap_content"
-                          android:layout_marginTop="8dp"
-                          android:text="Jeda klik maksimal (ms)"
-                          android:textColor="#94A3B8"
-                          android:textSize="12sp" />
-
-                      <EditText
-                          android:id="@+id/etDelayMax"
-                          android:layout_width="match_parent"
-                          android:layout_height="wrap_content"
-                          android:inputType="number"
-                          android:textColor="#FFFFFF" />
-
-                      <Button
-                          android:id="@+id/btnSave"
-                          android:layout_width="match_parent"
-                          android:layout_height="wrap_content"
-                          android:layout_marginTop="12dp"
-                          android:backgroundTint="#6366F1"
-                          android:text="SIMPAN FILTER" />
-                  </LinearLayout>
-
-                  <LinearLayout
-                      android:layout_width="match_parent"
-                      android:layout_height="wrap_content"
-                      android:background="#1E293B"
-                      android:orientation="vertical"
-                      android:padding="16dp">
-
-                      <TextView
-                          android:layout_width="wrap_content"
-                          android:layout_height="wrap_content"
-                          android:text="STATUS"
-                          android:textColor="#FFFFFF"
-                          android:textStyle="bold" />
-
-                      <TextView
-                          android:id="@+id/tvStatus"
-                          android:layout_width="match_parent"
-                          android:layout_height="wrap_content"
-                          android:layout_marginTop="8dp"
-                          android:textColor="#CBD5E1"
-                          android:textSize="13sp" />
-
-                      <TextView
-                          android:layout_width="wrap_content"
-                          android:layout_height="wrap_content"
-                          android:layout_marginTop="12dp"
-                          android:text="LOG TERAKHIR (untuk cek tombol/filter)"
-                          android:textColor="#FFFFFF"
-                          android:textStyle="bold" />
-
-                      <TextView
-                          android:id="@+id/tvLog"
-                          android:layout_width="match_parent"
-                          android:layout_height="wrap_content"
-                          android:layout_marginTop="6dp"
-                          android:textColor="#94A3B8"
-                          android:textSize="11sp" />
-                  </LinearLayout>
-              </LinearLayout>
-          </ScrollView>
-          GACOR_EOF
-          mkdir -p "app/src/main/res/layout"
-          cat > "app/src/main/res/layout/widget_floating.xml" <<'GACOR_EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <Button xmlns:android="http://schemas.android.com/apk/res/android"
-              android:id="@+id/btnWidgetToggle"
-              android:layout_width="90dp"
-              android:layout_height="42dp"
-              android:backgroundTint="#10B981"
-              android:padding="0dp"
-              android:text="SIKAT: ON"
-              android:textColor="#FFFFFF"
-              android:textSize="11sp"
-              android:textStyle="bold" />
+          mkdir -p "app/src/main/res/drawable"
+          cat > "app/src/main/res/drawable/ic_notif.xml" <<'GACOR_EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="24dp" android:height="24dp"
+              android:viewportWidth="24" android:viewportHeight="24">
+              <path android:fillColor="#FFFFFFFF" android:pathData="M13.5,2L6,13h5l-1.5,9L18,10h-5.5z"/>
+          </vector>
           GACOR_EOF
           mkdir -p "app/src/main/res/values"
           cat > "app/src/main/res/values/strings.xml" <<'GACOR_EOF'
           <resources>
               <string name="app_name">Karawang Gacor Engine</string>
-              <string name="service_desc">Membaca layar aplikasi Maxim Driver untuk menyaring dan menekan tombol ambil order sesuai filter Anda.</string>
+              <string name="service_desc">Membaca layar aplikasi Maxim Driver saja, lalu menyaring order (bike/delivery) dan menekan tombol ambil order sesuai filter Anda. Tidak ada koneksi internet dan tidak ada data yang dikirim keluar.</string>
           </resources>
           GACOR_EOF
           mkdir -p "app/src/main/res/values"
@@ -767,7 +1235,7 @@ jobs:
               android:canRetrieveWindowContent="true"
               android:description="@string/service_desc"
               android:packageNames="com.taxsee.driver"
-              android:notificationTimeout="50" />
+              android:notificationTimeout="30" />
           GACOR_EOF
           cat > "build.gradle" <<'GACOR_EOF'
           plugins {
